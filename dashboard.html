@@ -1,0 +1,1489 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-proxy · 账簿</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@300;400;500;600&family=Noto+Serif+SC:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:           #0d0c08;
+    --bg-soft:      #15130d;
+    --line:         #2a2618;
+    --line-bright:  #3d3724;
+    --fg:           #e0d7bf;
+    --fg-dim:       #8c8569;
+    --fg-sub:       #524d3c;
+    --accent:       #e8b04a;  /* 钠光琥珀 — 输入 / 成本 */
+    --accent-soft:  #f4d999;  /* 浅琥珀 — 总数 */
+    --coral:        #d97757;  /* 暖珊瑚 — 输出 */
+    --hero:         #5fb4a4;  /* 冷青 — 缓存命中 / 节省 */
+    --error:        #c46563;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'IBM Plex Mono', ui-monospace, 'PingFang SC', 'Microsoft YaHei', monospace;
+    font-weight: 400;
+    font-size: 13px;
+    line-height: 1.6;
+    font-feature-settings: 'tnum' 1, 'ss01' 1, 'zero' 1;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  body::after {
+    content: '';
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at top, rgba(232,176,74,0.04), transparent 60%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.95' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.5 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    opacity: 0.035;
+    pointer-events: none;
+    mix-blend-mode: overlay;
+    z-index: 100;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 56px 64px 96px;
+  }
+
+  .serif-cn {
+    font-family: 'Instrument Serif', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', serif;
+  }
+
+  /* -------- header -------- */
+  header {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: end;
+    gap: 24px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 0;
+  }
+  .wordmark { display: flex; flex-direction: column; gap: 4px; }
+  .wordmark .name {
+    font-size: 11px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+  }
+  .wordmark .sub {
+    font-family: 'Instrument Serif', 'Noto Serif SC', 'Source Han Serif SC', serif;
+    font-style: italic;
+    font-weight: 500;
+    font-size: 56px;
+    line-height: 0.95;
+    color: var(--fg);
+    letter-spacing: 0.02em;
+  }
+  .wordmark .sub .accent { color: var(--hero); font-style: normal; font-weight: 400; }
+  .meta { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+  .clock { display: flex; gap: 12px; align-items: center; font-size: 11px; color: var(--fg-dim); letter-spacing: 0.06em; }
+  .clock .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--hero); box-shadow: 0 0 8px var(--hero);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  .clock .dot.stale  { background: var(--fg-sub); box-shadow: none; animation: none; }
+  .clock .dot.error  { background: var(--error); box-shadow: 0 0 8px var(--error); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .clock .time { color: var(--fg); font-variant-numeric: tabular-nums; letter-spacing: 0.04em; }
+
+  .auth { display: flex; gap: 6px; align-items: stretch; }
+  .auth input {
+    background: var(--bg-soft); color: var(--fg);
+    border: 1px solid var(--line);
+    padding: 6px 10px;
+    font: inherit; font-size: 12px;
+    width: 220px; letter-spacing: 0.02em;
+  }
+  .auth input::placeholder { color: var(--fg-sub); }
+  .auth input:focus { outline: none; border-color: var(--hero); background: var(--bg); }
+  .auth button {
+    background: transparent; color: var(--fg-dim);
+    border: 1px solid var(--line);
+    padding: 0 14px;
+    font: inherit; font-size: 14px;
+    cursor: pointer; transition: all 120ms;
+  }
+  .auth button:hover { color: var(--hero); border-color: var(--hero); }
+  .auth button:active { transform: translateY(1px); }
+
+  /* -------- nav -------- */
+  nav.tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 40px;
+  }
+  nav.tabs a {
+    padding: 14px 22px;
+    color: var(--fg-dim);
+    text-decoration: none;
+    font-size: 11px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    border-bottom: 1px solid transparent;
+    margin-bottom: -1px;
+    transition: color 120ms, border-color 120ms;
+  }
+  nav.tabs a .cn {
+    font-family: 'Instrument Serif', 'Noto Serif SC', serif;
+    font-style: italic;
+    font-size: 15px;
+    margin-right: 8px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  nav.tabs a:hover { color: var(--fg); }
+  nav.tabs a.active { color: var(--fg); border-bottom-color: var(--hero); }
+
+  /* -------- filters -------- */
+  .filters {
+    display: grid;
+    grid-template-columns: 1.2fr 1.2fr 1.5fr 1.5fr auto;
+    gap: 28px;
+    padding: 0 0 24px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 48px;
+  }
+  .field { display: flex; flex-direction: column; gap: 8px; }
+  .field label { font-size: 10px; letter-spacing: 0.08em; color: var(--fg-dim); }
+  .field input, .field select, .field textarea {
+    background: transparent; color: var(--fg); border: none;
+    border-bottom: 1px solid var(--line);
+    padding: 4px 0;
+    font: inherit; font-size: 13px; letter-spacing: 0.02em;
+  }
+  .field select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg width='8' height='5' viewBox='0 0 8 5' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0 0 L4 5 L8 0' stroke='%238c8569' fill='none'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 4px center;
+    padding-right: 16px; cursor: pointer;
+  }
+  .field select option { background: var(--bg); color: var(--fg); }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-bottom-color: var(--hero); }
+  .field input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.6) sepia(0.3) hue-rotate(20deg); cursor: pointer;
+  }
+  .field .apply, .btn {
+    background: var(--fg); color: var(--bg);
+    border: none; padding: 8px 22px;
+    font: inherit; font-size: 12px;
+    font-weight: 500; letter-spacing: 0.18em;
+    cursor: pointer; transition: all 120ms;
+  }
+  .field .apply:hover, .btn:hover { background: var(--hero); }
+  .field .apply:active, .btn:active { transform: translateY(1px); }
+  .btn.ghost {
+    background: transparent; color: var(--fg-dim);
+    border: 1px solid var(--line);
+  }
+  .btn.ghost:hover { color: var(--hero); border-color: var(--hero); background: transparent; }
+  .btn.danger { background: var(--error); color: var(--bg); }
+  .btn.danger:hover { background: var(--coral); }
+
+  /* -------- hero -------- */
+  .hero {
+    padding: 40px 0 48px;
+    text-align: center;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 48px;
+    position: relative;
+  }
+  .hero::before, .hero::after {
+    content: ''; position: absolute; top: 40px;
+    width: 64px; height: 1px; background: var(--line-bright);
+  }
+  .hero::before { left: 0; } .hero::after { right: 0; }
+  .hero .label { font-size: 11px; letter-spacing: 0.32em; color: var(--fg-dim); margin-bottom: 24px; }
+  .hero .value {
+    font-family: 'Instrument Serif', serif;
+    font-style: italic; font-weight: 400;
+    font-size: 124px; line-height: 0.85;
+    color: var(--hero); letter-spacing: -0.04em;
+    font-variant-numeric: tabular-nums;
+  }
+  .hero .value .pct {
+    font-family: 'IBM Plex Mono', monospace; font-style: normal;
+    font-size: 0.28em; color: var(--hero); opacity: 0.55;
+    vertical-align: 0.78em; margin-left: 6px; letter-spacing: 0;
+  }
+  .hero .split-bar {
+    width: 420px; height: 4px;
+    background: var(--line);
+    margin: 28px auto 16px;
+    display: flex; overflow: hidden;
+  }
+  .hero .split-bar .cached { background: var(--hero); transition: width 600ms cubic-bezier(0.2,0.8,0.2,1); }
+  .hero .split-bar .fresh  { background: var(--accent); flex: 1; }
+  .hero .legend {
+    display: flex; justify-content: center; gap: 40px;
+    font-size: 12px; color: var(--fg-dim); letter-spacing: 0.04em;
+  }
+  .hero .legend b {
+    color: var(--fg); font-weight: 500;
+    margin-right: 6px; font-variant-numeric: tabular-nums;
+  }
+  .hero .legend .swatch { display: inline-block; width: 8px; height: 8px; margin-right: 8px; vertical-align: middle; }
+  .hero .legend .cached .swatch { background: var(--hero); }
+  .hero .legend .fresh  .swatch { background: var(--accent); }
+
+  /* -------- metrics grid -------- */
+  .totals {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+    border: 1px solid var(--line);
+    margin-bottom: 56px;
+  }
+  .metric {
+    padding: 22px 22px 20px;
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 10px;
+    position: relative;
+  }
+  .metric:nth-child(3n)        { border-right: none; }
+  .metric:nth-child(n+7)       { border-bottom: none; }
+  .metric .idx {
+    position: absolute; top: 10px; right: 14px;
+    font-size: 9px; color: var(--fg-sub); letter-spacing: 0.1em;
+  }
+  .metric .label { font-size: 11px; letter-spacing: 0.08em; color: var(--fg-dim); }
+  .metric .value {
+    font-size: 28px; font-weight: 300; color: var(--fg);
+    line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
+  }
+  .metric .value.cost    { color: var(--accent); }
+  .metric .value.cache   { color: var(--hero); }
+  .metric .value.error   { color: var(--error); }
+  .metric .value.zero    { color: var(--fg-sub); }
+  .metric .value.search  { color: var(--coral); }
+
+  /* -------- sections -------- */
+  .section { margin-bottom: 56px; }
+  .section-head {
+    display: flex; align-items: baseline;
+    gap: 16px; margin-bottom: 24px;
+  }
+  .section-head h2 { font-size: 12px; letter-spacing: 0.18em; color: var(--fg); font-weight: 500; margin: 0; }
+  .section-head .h-serif {
+    font-family: 'Instrument Serif', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', serif;
+    font-style: italic; font-size: 22px; color: var(--fg-dim); letter-spacing: 0.02em; font-weight: 400;
+  }
+  .section-head .rule { flex: 1; border-top: 1px solid var(--line); transform: translateY(-3px); }
+  .section-head .count { font-size: 11px; color: var(--fg-dim); letter-spacing: 0.04em; }
+  .section-head .right { display: flex; gap: 10px; align-items: center; }
+
+  /* -------- chart (5-line) -------- */
+  .chart-wrap {
+    position: relative;
+    padding: 0;
+    border: 1px solid var(--line);
+    background: rgba(21,19,13,0.4);
+  }
+  .chart-legend {
+    display: flex; flex-wrap: wrap;
+    gap: 16px 24px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11px; color: var(--fg-dim); letter-spacing: 0.04em;
+  }
+  .chart-legend label {
+    display: flex; align-items: center; gap: 8px;
+    cursor: pointer; user-select: none;
+    transition: color 120ms;
+  }
+  .chart-legend label:hover { color: var(--fg); }
+  .chart-legend input { display: none; }
+  .chart-legend .swatch {
+    display: inline-block; width: 14px; height: 2px;
+    transition: opacity 120ms;
+  }
+  .chart-legend label.muted { color: var(--fg-sub); }
+  .chart-legend label.muted .swatch { opacity: 0.25; }
+  .chart-legend b { color: var(--fg); font-weight: 500; margin-left: 4px; font-variant-numeric: tabular-nums; }
+  .chart-legend .right { margin-left: auto; display: flex; gap: 10px; }
+  .gran-toggle {
+    display: flex; border: 1px solid var(--line); height: 22px;
+  }
+  .gran-toggle button {
+    background: transparent; color: var(--fg-dim);
+    border: none; padding: 0 12px;
+    font: inherit; font-size: 10px; letter-spacing: 0.1em;
+    cursor: pointer;
+  }
+  .gran-toggle button.active { background: var(--fg); color: var(--bg); }
+  .chart {
+    width: 100%; height: 260px; display: block;
+  }
+  .chart text { font-family: 'IBM Plex Mono'; }
+
+  /* -------- table -------- */
+  table {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+  }
+  th {
+    text-align: left; font-weight: 400;
+    font-size: 11px; letter-spacing: 0.08em; color: var(--fg-dim);
+    padding: 10px 14px 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  td {
+    padding: 11px 14px 11px 0;
+    border-bottom: 1px solid var(--line);
+    color: var(--fg); vertical-align: middle;
+  }
+  tbody tr { transition: background 100ms; }
+  tbody tr:hover { background: rgba(232,176,74,0.025); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.clickable { cursor: pointer; }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.cost  { color: var(--accent); }
+  td.hit   { color: var(--hero); }
+  td.dim   { color: var(--fg-dim); }
+  td.zero  { color: var(--fg-sub); }
+  td.k { color: var(--fg); letter-spacing: 0.02em; word-break: break-all; }
+  td.k.mono { font-size: 11px; }
+  td.search { color: var(--coral); }
+  td.actions { text-align: right; white-space: nowrap; }
+  td.empty {
+    text-align: center; color: var(--fg-sub); padding: 40px;
+    font-style: italic; font-family: 'Instrument Serif', 'Noto Serif SC', serif;
+    font-size: 16px; letter-spacing: 0.04em;
+  }
+  .status-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 10px; letter-spacing: 0.06em;
+    border: 1px solid var(--line);
+  }
+  .status-pill.ok { color: var(--hero); border-color: rgba(95,180,164,0.4); }
+  .status-pill.err { color: var(--error); border-color: rgba(196,101,99,0.4); }
+  .status-pill.revoked { color: var(--fg-sub); }
+  .bar-track { width: 120px; height: 4px; background: var(--line); position: relative; display: inline-block; vertical-align: middle; }
+  .bar { height: 100%; background: var(--accent); opacity: 0.7; transition: width 480ms cubic-bezier(0.2,0.8,0.2,1); }
+
+  .breakdowns { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; }
+
+  /* -------- redaction -------- */
+  .redact {
+    display: inline-block;
+    background: linear-gradient(90deg, var(--line) 0%, var(--line-bright) 50%, var(--line) 100%);
+    background-size: 200% 100%;
+    color: transparent; border-radius: 1px;
+    animation: shimmer 2s linear infinite;
+    user-select: none;
+  }
+  @keyframes shimmer {
+    from { background-position: 200% 0; }
+    to   { background-position: -200% 0; }
+  }
+
+  /* -------- view switching -------- */
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* -------- footer -------- */
+  footer {
+    margin-top: 64px; padding-top: 24px;
+    border-top: 1px solid var(--line);
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: var(--fg-sub); letter-spacing: 0.06em;
+  }
+  footer .serif {
+    font-family: 'Instrument Serif', 'Noto Serif SC', 'Source Han Serif SC', serif;
+    font-style: italic; letter-spacing: 0.02em; font-size: 13px; color: var(--fg-dim);
+  }
+
+  /* -------- modal / drawer -------- */
+  .modal-bg {
+    position: fixed; inset: 0;
+    background: rgba(13,12,8,0.7);
+    backdrop-filter: blur(4px);
+    z-index: 500;
+    display: none;
+    align-items: center; justify-content: center;
+    padding: 40px;
+  }
+  .modal-bg.active { display: flex; }
+  .modal {
+    background: var(--bg-soft);
+    border: 1px solid var(--line-bright);
+    max-width: 540px; width: 100%;
+    max-height: 90vh; overflow-y: auto;
+    padding: 32px;
+    box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+  }
+  .modal h3 {
+    margin: 0 0 24px;
+    font-family: 'Instrument Serif', 'Noto Serif SC', serif;
+    font-style: italic; font-weight: 400;
+    font-size: 28px; color: var(--fg); letter-spacing: 0.02em;
+  }
+  .modal .grid {
+    display: grid; gap: 20px;
+    grid-template-columns: 1fr 1fr;
+    margin-bottom: 24px;
+  }
+  .modal .grid.full { grid-template-columns: 1fr; }
+  .modal .actions {
+    display: flex; justify-content: flex-end;
+    gap: 10px;
+    margin-top: 8px;
+  }
+  .modal .reveal {
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    padding: 16px;
+    margin-bottom: 24px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px; color: var(--accent);
+    word-break: break-all; letter-spacing: 0.02em;
+  }
+  .modal .reveal-note {
+    font-size: 11px; color: var(--fg-dim);
+    margin-top: 8px; letter-spacing: 0.02em;
+  }
+
+  .model-check-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 16px;
+    max-height: 200px; overflow-y: auto;
+    border: 1px solid var(--line);
+    padding: 12px; background: var(--bg);
+  }
+  .model-check-grid label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: var(--fg); cursor: pointer;
+  }
+  .model-check-grid input { accent-color: var(--hero); }
+
+  /* drawer for log detail */
+  .drawer-bg {
+    position: fixed; inset: 0;
+    background: rgba(13,12,8,0.7);
+    backdrop-filter: blur(4px);
+    z-index: 500;
+    display: none;
+  }
+  .drawer-bg.active { display: block; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0;
+    width: 720px; max-width: 92vw;
+    background: var(--bg-soft);
+    border-left: 1px solid var(--line-bright);
+    padding: 32px; overflow-y: auto;
+    box-shadow: -24px 0 60px rgba(0,0,0,0.5);
+  }
+  .drawer h3 {
+    margin: 0 0 8px;
+    font-family: 'Instrument Serif', 'Noto Serif SC', serif;
+    font-style: italic; font-weight: 400;
+    font-size: 32px; color: var(--fg); letter-spacing: 0.02em;
+  }
+  .drawer .subhead {
+    color: var(--fg-dim); font-size: 11px;
+    margin-bottom: 24px; letter-spacing: 0.04em;
+  }
+  .drawer .kv {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 6px 14px;
+    margin-bottom: 24px;
+    font-size: 12px;
+  }
+  .drawer .kv dt { color: var(--fg-dim); letter-spacing: 0.04em; }
+  .drawer .kv dd { color: var(--fg); margin: 0; font-variant-numeric: tabular-nums; word-break: break-all; }
+  .drawer pre {
+    background: var(--bg);
+    border: 1px solid var(--line);
+    padding: 14px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px; color: var(--fg);
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 320px; overflow-y: auto;
+    margin: 0 0 20px;
+    letter-spacing: 0.02em;
+  }
+  .drawer h4 {
+    margin: 0 0 8px;
+    font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--fg-dim); font-weight: 500;
+  }
+  .toggle {
+    position: relative; display: inline-block;
+    width: 36px; height: 18px;
+    background: var(--line); cursor: pointer;
+    transition: background 120ms;
+    flex-shrink: 0;
+  }
+  .toggle::after {
+    content: ''; position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    background: var(--fg-dim);
+    transition: transform 160ms, background 120ms;
+  }
+  .toggle.on { background: rgba(95,180,164,0.3); }
+  .toggle.on::after { transform: translateX(18px); background: var(--hero); }
+
+  /* fade-up */
+  .fade-up { animation: fade-up 720ms cubic-bezier(0.2, 0.8, 0.2, 1) backwards; }
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  @media (max-width: 880px) {
+    .container { padding: 32px 24px 64px; }
+    header { grid-template-columns: 1fr; }
+    .meta { align-items: flex-start; }
+    .filters { grid-template-columns: 1fr 1fr; }
+    .totals { grid-template-columns: repeat(2, 1fr); }
+    .metric:nth-child(3n)        { border-right: 1px solid var(--line); }
+    .metric:nth-child(2n)        { border-right: none; }
+    .metric:nth-child(n+7)       { border-bottom: 1px solid var(--line); }
+    .metric:nth-child(n+9)       { border-bottom: none; }
+    .breakdowns { grid-template-columns: 1fr; gap: 48px; }
+    .hero .value { font-size: 96px; }
+    .hero .split-bar { width: 100%; }
+    .wordmark .sub { font-size: 40px; }
+    .modal .grid { grid-template-columns: 1fr; }
+    .drawer { width: 100%; }
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+
+    <header class="fade-up">
+      <div class="wordmark">
+        <div class="name">claude-proxy</div>
+        <div class="sub"><span class="accent">账</span>簿</div>
+      </div>
+      <div class="meta">
+        <div class="clock">
+          <span class="dot stale" id="dot"></span>
+          <span id="clock-label">待命</span>
+          <span class="time" id="clock">— : — : —</span>
+        </div>
+        <div class="auth">
+          <input type="password" id="token" placeholder="管理员令牌" autocomplete="off" spellcheck="false">
+          <button id="refresh" title="刷新">↻</button>
+        </div>
+      </div>
+    </header>
+
+    <nav class="tabs fade-up" style="animation-delay: 60ms">
+      <a href="#/overview" data-route="overview"><span class="cn">总览</span>OVERVIEW</a>
+      <a href="#/keys" data-route="keys"><span class="cn">密钥</span>KEYS</a>
+      <a href="#/models" data-route="models"><span class="cn">模型</span>MODELS</a>
+      <a href="#/logs" data-route="logs"><span class="cn">日志</span>LOGS</a>
+    </nav>
+
+    <!-- ============ OVERVIEW ============ -->
+    <section id="view-overview" class="view">
+      <div class="filters fade-up" style="animation-delay: 80ms">
+        <div class="field"><label>起始日期</label><input type="date" id="o-since"></div>
+        <div class="field"><label>截止日期</label><input type="date" id="o-until"></div>
+        <div class="field"><label>代理密钥</label><select id="o-proxy-key"><option value="">全部</option></select></div>
+        <div class="field"><label>模型</label><select id="o-model"><option value="">全部</option></select></div>
+        <div class="field"><label>&nbsp;</label><button class="apply" id="o-apply">应用</button></div>
+      </div>
+
+      <section class="hero fade-up" style="animation-delay: 160ms">
+        <div class="label">缓存命中率</div>
+        <div class="value">
+          <span id="hit-rate">—</span><span class="pct">%</span>
+        </div>
+        <div class="split-bar">
+          <div class="cached" id="bar-cached" style="width: 0%"></div>
+          <div class="fresh"></div>
+        </div>
+        <div class="legend">
+          <div class="cached"><span class="swatch"></span><b id="hit-cached">—</b>命中</div>
+          <div class="fresh"><span class="swatch"></span><b id="hit-fresh">—</b>新算</div>
+        </div>
+      </section>
+
+      <section class="totals fade-up" style="animation-delay: 240ms">
+        <div class="metric"><span class="idx">01</span><span class="label">请求数</span><span class="value" id="t-requests">—</span></div>
+        <div class="metric"><span class="idx">02</span><span class="label">总成本</span><span class="value cost" id="t-cost">$—</span></div>
+        <div class="metric"><span class="idx">03</span><span class="label">网络搜索</span><span class="value search" id="t-search">—</span></div>
+        <div class="metric"><span class="idx">04</span><span class="label">输入 token</span><span class="value" id="t-input">—</span></div>
+        <div class="metric"><span class="idx">05</span><span class="label">输出 token</span><span class="value" id="t-output">—</span></div>
+        <div class="metric"><span class="idx">06</span><span class="label">缓存读取</span><span class="value cache" id="t-cache-read">—</span></div>
+        <div class="metric"><span class="idx">07</span><span class="label">缓存写入 · 5分</span><span class="value" id="t-cache-5m">—</span></div>
+        <div class="metric"><span class="idx">08</span><span class="label">缓存写入 · 1时</span><span class="value" id="t-cache-1h">—</span></div>
+        <div class="metric"><span class="idx">09</span><span class="label">错误</span><span class="value error" id="t-errors">—</span></div>
+      </section>
+
+      <section class="section fade-up" style="animation-delay: 320ms">
+        <div class="section-head">
+          <h2>时序</h2>
+          <span class="h-serif">用量轨迹</span>
+          <span class="rule"></span>
+        </div>
+        <div class="chart-wrap">
+          <div class="chart-legend" id="chart-legend">
+            <label data-line="input"><span class="swatch" style="background:#e8b04a"></span>输入 <b id="l-input">—</b></label>
+            <label data-line="output"><span class="swatch" style="background:#d97757"></span>输出 <b id="l-output">—</b></label>
+            <label data-line="total"><span class="swatch" style="background:#f4d999"></span>总数 <b id="l-total">—</b></label>
+            <label data-line="cache"><span class="swatch" style="background:#5fb4a4"></span>缓存 <b id="l-cache">—</b></label>
+            <label data-line="hit"><span class="swatch" style="background:#5fb4a4;border-top:1px dashed var(--bg);"></span>命中率 <b id="l-hit">—</b></label>
+            <div class="right">
+              <div class="gran-toggle">
+                <button data-gran="day" class="active">日</button>
+                <button data-gran="hour">时</button>
+              </div>
+            </div>
+          </div>
+          <svg class="chart" id="chart" viewBox="0 0 700 260" preserveAspectRatio="none"></svg>
+        </div>
+      </section>
+
+      <section class="section fade-up" style="animation-delay: 400ms">
+        <div class="breakdowns">
+          <div>
+            <div class="section-head">
+              <h2>按密钥</h2><span class="h-serif">何人</span><span class="rule"></span><span class="count" id="key-count">— 行</span>
+            </div>
+            <table id="key-table"></table>
+          </div>
+          <div>
+            <div class="section-head">
+              <h2>按模型</h2><span class="h-serif">何模</span><span class="rule"></span><span class="count" id="model-count">— 行</span>
+            </div>
+            <table id="model-table"></table>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <!-- ============ KEYS ============ -->
+    <section id="view-keys" class="view">
+      <div class="section-head" style="margin-top: 8px">
+        <h2>代理密钥</h2>
+        <span class="h-serif">凭据</span>
+        <span class="rule"></span>
+        <div class="right">
+          <label style="font-size:11px;color:var(--fg-dim);letter-spacing:0.04em;display:flex;gap:6px;align-items:center;cursor:pointer">
+            <input type="checkbox" id="show-revoked" style="accent-color:var(--hero)"> 显示已撤销
+          </label>
+          <button class="btn" id="key-create">新建密钥</button>
+        </div>
+      </div>
+      <table id="keys-table"></table>
+    </section>
+
+    <!-- ============ MODELS ============ -->
+    <section id="view-models" class="view">
+      <div class="section-head" style="margin-top: 8px">
+        <h2>模型列表</h2>
+        <span class="h-serif">何可用</span>
+        <span class="rule"></span>
+        <span class="count" id="models-count">— 行</span>
+      </div>
+      <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
+        每 30 分钟从上游同步一次。停用后该模型立即不可经此网关调用。
+      </p>
+      <table id="models-table"></table>
+    </section>
+
+    <!-- ============ LOGS ============ -->
+    <section id="view-logs" class="view">
+      <div class="filters" style="margin-bottom:32px">
+        <div class="field"><label>代理密钥</label><select id="lg-proxy-key"><option value="">全部</option></select></div>
+        <div class="field"><label>模型</label><select id="lg-model"><option value="">全部</option></select></div>
+        <div class="field"><label>状态</label>
+          <select id="lg-status">
+            <option value="">全部</option>
+            <option value="success">成功 (2xx)</option>
+            <option value="error">错误 (非 2xx)</option>
+          </select>
+        </div>
+        <div class="field"><label>条数</label>
+          <select id="lg-limit">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+          </select>
+        </div>
+        <div class="field"><label>&nbsp;</label><button class="apply" id="lg-apply">应用</button></div>
+      </div>
+      <div class="section-head">
+        <h2>请求流水</h2>
+        <span class="h-serif">每一次往返</span>
+        <span class="rule"></span>
+        <span class="count" id="logs-count">— 条</span>
+      </div>
+      <table id="logs-table"></table>
+      <div style="text-align:center;margin-top:24px">
+        <button class="btn ghost" id="logs-more" style="display:none">加载更早</button>
+      </div>
+    </section>
+
+    <footer>
+      <span>本机 · 127.0.0.1:8787</span>
+      <span class="serif">一份透明的账簿。</span>
+      <span id="footer-status">—</span>
+    </footer>
+  </div>
+
+  <!-- key create / edit modal -->
+  <div class="modal-bg" id="modal-key-bg">
+    <div class="modal">
+      <h3 id="modal-key-title">新建密钥</h3>
+      <div id="modal-key-reveal" style="display:none">
+        <div class="reveal" id="modal-key-reveal-text"></div>
+        <div class="reveal-note">这是该密钥的完整明文，目前可在数据库中查到，但仍请妥善保存并分发。</div>
+      </div>
+      <div class="grid">
+        <div class="field"><label>持有者</label><input id="mk-owner" type="text" placeholder="例如：me / alice / cc"></div>
+        <div class="field"><label>每日预算 (USD)</label><input id="mk-budget" type="number" min="0" step="0.01" placeholder="0 = 无限制"></div>
+      </div>
+      <div class="grid full">
+        <div class="field"><label>备注</label><input id="mk-notes" type="text" placeholder="可选"></div>
+      </div>
+      <div class="grid full">
+        <div class="field">
+          <label>允许模型 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">不勾选任何则允许全部</span></label>
+          <div class="model-check-grid" id="mk-models"></div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="mk-cancel">取消</button>
+        <button class="btn" id="mk-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- log detail drawer -->
+  <div class="drawer-bg" id="drawer-bg">
+    <div class="drawer" id="drawer">
+      <h3>请求详情</h3>
+      <div class="subhead" id="drw-id">—</div>
+      <dl class="kv" id="drw-kv"></dl>
+      <h4>请求 BODY</h4>
+      <pre id="drw-req">—</pre>
+      <h4>响应 BODY</h4>
+      <pre id="drw-resp">—</pre>
+      <div class="actions" style="display:flex;justify-content:flex-end;gap:10px;margin-top:8px">
+        <button class="btn ghost" id="drw-close">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function() {
+    const $ = (s) => document.querySelector(s);
+    const $$ = (s) => Array.from(document.querySelectorAll(s));
+
+    // ---------- auth ----------
+    const tokenInput = $('#token');
+    tokenInput.value = localStorage.getItem('claude-proxy-token') || '';
+    tokenInput.addEventListener('change', () => {
+      localStorage.setItem('claude-proxy-token', tokenInput.value);
+      reloadCurrent();
+    });
+    tokenInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') reloadCurrent(); });
+
+    async function adminFetch(path, opts) {
+      const token = tokenInput.value.trim();
+      if (!token) throw new Error('未填管理员令牌');
+      const fullOpts = Object.assign({}, opts || {});
+      fullOpts.headers = Object.assign({}, fullOpts.headers || {}, {
+        'Authorization': 'Bearer ' + token,
+      });
+      if (fullOpts.body && typeof fullOpts.body !== 'string') {
+        fullOpts.body = JSON.stringify(fullOpts.body);
+        fullOpts.headers['Content-Type'] = 'application/json';
+      }
+      const resp = await fetch(path, fullOpts);
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => '');
+        throw new Error('HTTP ' + resp.status + ' — ' + txt);
+      }
+      return resp.json();
+    }
+
+    // ---------- formatters ----------
+    const fmtInt = (n) => n == null ? '—' : new Intl.NumberFormat('en-US').format(Math.round(n));
+    const fmtCost = (n) => {
+      if (n == null) return '$—';
+      if (n === 0) return '$0';
+      if (n < 0.0001) return '<$0.0001';
+      if (n < 0.01) return '$' + n.toFixed(4);
+      if (n < 1) return '$' + n.toFixed(3);
+      if (n < 100) return '$' + n.toFixed(2);
+      return '$' + Math.round(n);
+    };
+    const fmtPct = (n) => {
+      if (n == null || isNaN(n)) return '—';
+      const pct = n * 100;
+      return pct >= 10 ? pct.toFixed(1) : pct.toFixed(2);
+    };
+    const fmtTime = (s) => {
+      const d = new Date(s);
+      const pad = (n) => String(n).padStart(2, '0');
+      return pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    };
+    const escHTML = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const truncKey = (k) => {
+      if (!k) return '';
+      if (k.length <= 24) return k;
+      return k.slice(0, 16) + '…' + k.slice(-4);
+    };
+
+    function setStatus(state, label) {
+      $('#dot').className = 'dot' + (state === 'live' ? '' : state === 'error' ? ' error' : ' stale');
+      $('#clock-label').textContent = label;
+    }
+    function tickClock() {
+      $('#clock').textContent = new Date().toTimeString().slice(0, 8);
+    }
+    setInterval(tickClock, 1000); tickClock();
+
+    // ---------- routing ----------
+    function currentRoute() {
+      const h = location.hash || '#/overview';
+      return h.replace(/^#\//, '') || 'overview';
+    }
+    function applyRoute() {
+      const route = currentRoute();
+      $$('.view').forEach(v => v.classList.remove('active'));
+      const v = document.querySelector('#view-' + route);
+      if (v) v.classList.add('active');
+      $$('nav.tabs a').forEach(a => a.classList.toggle('active', a.dataset.route === route));
+      loadRoute(route);
+    }
+    window.addEventListener('hashchange', applyRoute);
+
+    function loadRoute(route) {
+      if (route === 'overview') { fetchStats(); fetchTimeseries(); }
+      else if (route === 'keys') { fetchKeys(); }
+      else if (route === 'models') { fetchModels(); }
+      else if (route === 'logs') { logsCursor = 0; logsRows = []; fetchLogs(); fillLogsFilterSelects(); }
+    }
+    function reloadCurrent() { loadRoute(currentRoute()); }
+
+    $('#refresh').addEventListener('click', reloadCurrent);
+
+    // =================================================
+    // OVERVIEW
+    // =================================================
+    const restored = JSON.parse(localStorage.getItem('claude-proxy-filters') || '{}');
+    if (restored.since) $('#o-since').value = restored.since;
+    if (restored.until) $('#o-until').value = restored.until;
+
+    $('#o-apply').addEventListener('click', () => { fetchStats(); fetchTimeseries(); });
+
+    function overviewFilterParams() {
+      const p = new URLSearchParams();
+      const since = $('#o-since').value, until = $('#o-until').value;
+      const pk = $('#o-proxy-key').value, md = $('#o-model').value;
+      if (since) p.set('since', since);
+      if (until) p.set('until', until);
+      if (pk) p.set('proxy_key', pk);
+      if (md) p.set('model', md);
+      localStorage.setItem('claude-proxy-filters', JSON.stringify({since, until}));
+      return p;
+    }
+
+    async function fetchStats() {
+      if (!tokenInput.value.trim()) { renderOverviewEmpty('请输入管理员令牌以解锁'); setStatus('stale','待命'); return; }
+      setStatus('stale', '拉取中');
+      try {
+        const t0 = performance.now();
+        const data = await adminFetch('/admin/stats?' + overviewFilterParams());
+        const dt = Math.round(performance.now() - t0);
+        renderOverview(data);
+        setStatus('live', '在线 · ' + dt + 'ms');
+        $('#footer-status').textContent = '同步 ' + new Date().toTimeString().slice(0,8);
+      } catch (e) {
+        renderOverviewEmpty('连接失败 — ' + e.message);
+        setStatus('error', '故障');
+      }
+    }
+
+    function renderOverview(data) {
+      const hitPct = data.cache_hit_rate || 0;
+      $('#hit-rate').textContent = fmtPct(hitPct);
+      $('#hit-cached').textContent = fmtInt(data.cache_read);
+      $('#hit-fresh').textContent = fmtInt(data.input_tokens);
+      $('#bar-cached').style.width = (hitPct * 100).toFixed(1) + '%';
+
+      $('#t-requests').textContent  = fmtInt(data.requests);
+      $('#t-cost').textContent      = fmtCost(data.cost_usd);
+      $('#t-search').textContent    = fmtInt(data.web_search_count);
+      $('#t-input').textContent     = fmtInt(data.input_tokens);
+      $('#t-output').textContent    = fmtInt(data.output_tokens);
+      $('#t-cache-read').textContent= fmtInt(data.cache_read);
+      $('#t-cache-5m').textContent  = fmtInt(data.cache_create_5m);
+      $('#t-cache-1h').textContent  = fmtInt(data.cache_create_1h);
+      $('#t-errors').textContent    = fmtInt(data.errors);
+
+      ['t-search','t-cache-1h','t-errors'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el.textContent === '0') el.classList.add('zero');
+        else el.classList.remove('zero');
+      });
+
+      renderBreakdown('#key-table', '#key-count', data.by_proxy_key || []);
+      renderBreakdown('#model-table', '#model-count', data.by_model || []);
+      populateSelect('#o-proxy-key', data.by_proxy_key, $('#o-proxy-key').value);
+      populateSelect('#o-model',     data.by_model,     $('#o-model').value);
+    }
+
+    function renderOverviewEmpty(msg) {
+      ['hit-rate','t-requests','t-cost','t-search','t-input','t-output','t-cache-read','t-cache-5m','t-cache-1h','t-errors','hit-cached','hit-fresh']
+        .forEach(id => {
+          const el = document.getElementById(id);
+          const sample = id.includes('cost') ? '$00.00' : '00,000';
+          el.innerHTML = '<span class="redact">' + sample + '</span>';
+        });
+      $('#bar-cached').style.width = '0%';
+      $('#key-table').innerHTML   = '<tbody><tr><td class="empty" colspan="5">' + escHTML(msg) + '</td></tr></tbody>';
+      $('#model-table').innerHTML = '<tbody><tr><td class="empty" colspan="5">' + escHTML(msg) + '</td></tr></tbody>';
+      $('#chart').innerHTML = '<text x="350" y="130" fill="#524d3c" text-anchor="middle" font-size="12" letter-spacing="0.1em">' + escHTML(msg) + '</text>';
+      $('#footer-status').textContent = '闲置';
+    }
+
+    function renderBreakdown(tableSel, countSel, rows) {
+      const t = $(tableSel);
+      $(countSel).textContent = rows.length + ' 行';
+      if (rows.length === 0) {
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="5">暂无数据</td></tr></tbody>';
+        return;
+      }
+      const maxCost = Math.max(...rows.map(r => r.cost_usd), 1e-9);
+      let html = '<thead><tr>';
+      html += '<th>名称</th><th class="num">请求</th><th class="num">成本</th><th class="num">命中</th><th>分布</th>';
+      html += '</tr></thead><tbody>';
+      for (const r of rows) {
+        const w = Math.max(2, (r.cost_usd / maxCost) * 100);
+        const hitClass = r.cache_hit_rate > 0 ? 'hit' : 'zero';
+        html += '<tr>';
+        html += '<td class="k mono">' + escHTML(truncKey(r.key || '(未知)')) + '</td>';
+        html += '<td class="num">' + fmtInt(r.requests) + '</td>';
+        html += '<td class="num ' + (r.cost_usd > 0 ? 'cost' : 'zero') + '">' + fmtCost(r.cost_usd) + '</td>';
+        html += '<td class="num ' + hitClass + '">' + fmtPct(r.cache_hit_rate) + '</td>';
+        html += '<td><div class="bar-track"><div class="bar" style="width:' + w + '%"></div></div></td>';
+        html += '</tr>';
+      }
+      html += '</tbody>';
+      t.innerHTML = html;
+    }
+
+    function populateSelect(sel, items, current) {
+      const el = $(sel);
+      const seen = new Set();
+      const opts = ['<option value="">全部</option>'];
+      for (const it of items || []) {
+        const k = it.key;
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        opts.push('<option value="' + escHTML(k) + '"' + (k === current ? ' selected' : '') + '>' + escHTML(k) + '</option>');
+      }
+      el.innerHTML = opts.join('');
+    }
+
+    // ---------- 5-line chart ----------
+    let chartGranularity = localStorage.getItem('claude-proxy-gran') || 'day';
+    let chartData = [];
+    let chartLineEnabled = {
+      input: true, output: true, total: true, cache: true, hit: true,
+    };
+
+    $$('.gran-toggle button').forEach(btn => {
+      if (btn.dataset.gran === chartGranularity) btn.classList.add('active');
+      btn.addEventListener('click', () => {
+        chartGranularity = btn.dataset.gran;
+        localStorage.setItem('claude-proxy-gran', chartGranularity);
+        $$('.gran-toggle button').forEach(b => b.classList.toggle('active', b.dataset.gran === chartGranularity));
+        fetchTimeseries();
+      });
+    });
+
+    $$('#chart-legend label[data-line]').forEach(l => {
+      l.addEventListener('click', (e) => {
+        const k = l.dataset.line;
+        chartLineEnabled[k] = !chartLineEnabled[k];
+        l.classList.toggle('muted', !chartLineEnabled[k]);
+        drawChart();
+      });
+    });
+
+    async function fetchTimeseries() {
+      if (!tokenInput.value.trim()) return;
+      try {
+        const params = overviewFilterParams();
+        params.set('granularity', chartGranularity);
+        const data = await adminFetch('/admin/timeseries?' + params);
+        chartData = data.buckets || [];
+        drawChart();
+      } catch (e) {
+        $('#chart').innerHTML = '<text x="350" y="130" fill="#c46563" text-anchor="middle" font-size="12">' + escHTML(e.message) + '</text>';
+      }
+    }
+
+    function drawChart() {
+      const svg = $('#chart');
+      const data = chartData;
+      const w = 700, h = 260;
+      const pl = 50, pr = 50, pt = 16, pb = 30;
+      const cw = w - pl - pr, ch = h - pt - pb;
+
+      // legend totals (sum across whole window)
+      let sumIn=0, sumOut=0, sumCache=0, weightedHit=0, weightedIn=0;
+      for (const d of data) {
+        sumIn += d.input_tokens; sumOut += d.output_tokens; sumCache += d.cache_read;
+        weightedHit += d.cache_read; weightedIn += d.input_tokens + d.cache_read;
+      }
+      const overallHit = weightedIn > 0 ? weightedHit / weightedIn : 0;
+      $('#l-input').textContent  = fmtInt(sumIn);
+      $('#l-output').textContent = fmtInt(sumOut);
+      $('#l-total').textContent  = fmtInt(sumIn + sumOut);
+      $('#l-cache').textContent  = fmtInt(sumCache);
+      $('#l-hit').textContent    = fmtPct(overallHit) + '%';
+
+      if (data.length === 0) {
+        svg.innerHTML = '<text x="' + (w/2) + '" y="' + (h/2) + '" fill="#524d3c" text-anchor="middle" font-size="12" letter-spacing="0.12em">暂无时序数据</text>';
+        return;
+      }
+
+      // build series
+      const series = {
+        input:  data.map(d => d.input_tokens),
+        output: data.map(d => d.output_tokens),
+        total:  data.map(d => d.input_tokens + d.output_tokens),
+        cache:  data.map(d => d.cache_read),
+        hit:    data.map(d => d.cache_hit_rate),
+      };
+      // max for left axis = max of enabled token series
+      let leftMax = 1;
+      ['input','output','total','cache'].forEach(k => {
+        if (chartLineEnabled[k]) leftMax = Math.max(leftMax, ...series[k]);
+      });
+      // hit right axis is always 0..1
+
+      const xFor = (i) => data.length === 1 ? pl + cw/2 : pl + (cw * i / (data.length - 1));
+      const yLeft = (v) => pt + ch - (v / leftMax) * ch;
+      const yRight = (v) => pt + ch - v * ch;
+
+      let g = '';
+      // grid + axes
+      g += `<line x1="${pl}" y1="${pt + ch}" x2="${pl + cw}" y2="${pt + ch}" stroke="#2a2618"/>`;
+      // horizontal gridlines (4)
+      for (let i = 1; i <= 4; i++) {
+        const y = pt + ch - (i / 4) * ch;
+        g += `<line x1="${pl}" y1="${y}" x2="${pl + cw}" y2="${y}" stroke="#2a2618" stroke-width="0.5" stroke-dasharray="2 4"/>`;
+        const leftLabel = fmtAxisToken(leftMax * i / 4);
+        g += `<text x="${pl - 6}" y="${y + 3}" fill="#8c8569" font-size="9" text-anchor="end" letter-spacing="0.04em">${escHTML(leftLabel)}</text>`;
+        const rightLabel = (i / 4 * 100).toFixed(0) + '%';
+        g += `<text x="${pl + cw + 6}" y="${y + 3}" fill="#5fb4a4" font-size="9" letter-spacing="0.04em">${escHTML(rightLabel)}</text>`;
+      }
+      // baseline labels (0)
+      g += `<text x="${pl - 6}" y="${pt + ch + 3}" fill="#524d3c" font-size="9" text-anchor="end">0</text>`;
+      g += `<text x="${pl + cw + 6}" y="${pt + ch + 3}" fill="#524d3c" font-size="9">0%</text>`;
+
+      // x labels (start, middle, end)
+      const xLabels = [];
+      if (data.length > 0) xLabels.push({i: 0, t: data[0].bucket});
+      if (data.length > 2) xLabels.push({i: Math.floor((data.length-1)/2), t: data[Math.floor((data.length-1)/2)].bucket});
+      if (data.length > 1) xLabels.push({i: data.length-1, t: data[data.length-1].bucket});
+      for (const xl of xLabels) {
+        g += `<text x="${xFor(xl.i)}" y="${pt + ch + 18}" fill="#8c8569" font-size="9" text-anchor="middle" letter-spacing="0.04em">${escHTML(xl.t)}</text>`;
+      }
+
+      // lines
+      const colors = {
+        input: '#e8b04a', output: '#d97757', total: '#f4d999', cache: '#5fb4a4',
+      };
+      const widths = { input: 1.4, output: 1.4, total: 1.0, cache: 1.4 };
+      const dasharray = { total: '3 3' };
+      ['total','input','output','cache'].forEach(k => {
+        if (!chartLineEnabled[k]) return;
+        const pts = series[k].map((v, i) => [xFor(i), yLeft(v)]);
+        const d = pts.map((p,i) => (i===0?'M':'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+        const da = dasharray[k] ? ` stroke-dasharray="${dasharray[k]}"` : '';
+        g += `<path d="${d}" fill="none" stroke="${colors[k]}" stroke-width="${widths[k]}" stroke-linejoin="round"${da}/>`;
+        if (data.length === 1) {
+          g += `<circle cx="${pts[0][0]}" cy="${pts[0][1]}" r="3" fill="${colors[k]}"/>`;
+        }
+      });
+      // hit rate (right axis)
+      if (chartLineEnabled.hit) {
+        const pts = series.hit.map((v,i) => [xFor(i), yRight(v)]);
+        const d = pts.map((p,i) => (i===0?'M':'L') + p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ');
+        g += `<path d="${d}" fill="none" stroke="#5fb4a4" stroke-width="1.2" stroke-dasharray="4 3" stroke-linejoin="round" opacity="0.85"/>`;
+        if (data.length === 1) g += `<circle cx="${pts[0][0]}" cy="${pts[0][1]}" r="3" fill="#5fb4a4"/>`;
+      }
+
+      svg.innerHTML = g;
+    }
+
+    function fmtAxisToken(n) {
+      if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+      if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+      return String(Math.round(n));
+    }
+
+    // =================================================
+    // KEYS
+    // =================================================
+    let modelOptionsCache = []; // for create modal
+
+    $('#show-revoked').addEventListener('change', fetchKeys);
+    $('#key-create').addEventListener('click', () => openKeyModal(null));
+
+    async function fetchKeys() {
+      try {
+        const inc = $('#show-revoked').checked ? '?include_revoked=true' : '';
+        const list = await adminFetch('/admin/keys' + inc);
+        renderKeys(list || []);
+        // refresh model cache for create modal
+        if (!modelOptionsCache.length) {
+          try { modelOptionsCache = await adminFetch('/admin/models'); } catch (e) {}
+        }
+      } catch (e) {
+        $('#keys-table').innerHTML = '<tbody><tr><td class="empty" colspan="7">' + escHTML(e.message) + '</td></tr></tbody>';
+      }
+    }
+
+    function renderKeys(rows) {
+      const t = $('#keys-table');
+      if (rows.length === 0) {
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="7">尚无密钥。点击右上「新建密钥」开始。</td></tr></tbody>';
+        return;
+      }
+      let html = '<thead><tr>';
+      html += '<th>密钥</th><th>持有者</th><th class="num">日预算</th><th>允许模型</th><th>创建</th><th>状态</th><th class="actions">操作</th>';
+      html += '</tr></thead><tbody>';
+      for (const k of rows) {
+        const revoked = !!k.revoked_at;
+        const allowed = (k.allowed_models === '*' || !k.allowed_models) ? '全部' : (() => {
+          try { const a = JSON.parse(k.allowed_models); return a.length + ' 个'; } catch { return '自定义'; }
+        })();
+        html += '<tr data-key="' + escHTML(k.key) + '">';
+        html += '<td class="k mono" title="' + escHTML(k.key) + '">' + escHTML(truncKey(k.key)) + '</td>';
+        html += '<td class="dim">' + escHTML(k.owner) + '</td>';
+        html += '<td class="num ' + (k.daily_budget > 0 ? 'cost' : 'zero') + '">' + (k.daily_budget > 0 ? fmtCost(k.daily_budget) : '无限') + '</td>';
+        html += '<td class="dim">' + escHTML(allowed) + '</td>';
+        html += '<td class="dim">' + escHTML(fmtTime(k.created_at)) + '</td>';
+        html += '<td>' + (revoked
+          ? '<span class="status-pill revoked">已撤销</span>'
+          : '<span class="status-pill ok">活跃</span>') + '</td>';
+        html += '<td class="actions">';
+        if (!revoked) {
+          html += '<button class="btn ghost" data-act="edit" style="padding:4px 10px;font-size:10px;margin-right:6px">编辑</button>';
+          html += '<button class="btn ghost" data-act="revoke" style="padding:4px 10px;font-size:10px;color:var(--error)">撤销</button>';
+        } else {
+          html += '<span class="dim" style="font-size:10px">—</span>';
+        }
+        html += '</td></tr>';
+      }
+      html += '</tbody>';
+      t.innerHTML = html;
+
+      t.querySelectorAll('tr[data-key]').forEach(tr => {
+        const key = tr.dataset.key;
+        tr.querySelectorAll('button[data-act]').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (btn.dataset.act === 'revoke') {
+              if (!confirm('撤销密钥 ' + truncKey(key) + '？此操作不可逆。')) return;
+              try {
+                await adminFetch('/admin/keys/' + encodeURIComponent(key), { method: 'DELETE' });
+                fetchKeys();
+              } catch (e) { alert('撤销失败：' + e.message); }
+            } else if (btn.dataset.act === 'edit') {
+              const km = (await adminFetch('/admin/keys/' + encodeURIComponent(key)));
+              openKeyModal(km);
+            }
+          });
+        });
+      });
+    }
+
+    // ---------- key modal ----------
+    let modalKeyEditing = null; // null = create
+
+    function openKeyModal(km) {
+      modalKeyEditing = km;
+      $('#modal-key-reveal').style.display = 'none';
+      $('#modal-key-title').textContent = km ? '编辑密钥' : '新建密钥';
+      $('#mk-owner').value = km ? (km.owner || '') : '';
+      $('#mk-owner').disabled = false;
+      $('#mk-budget').value = km && km.daily_budget ? km.daily_budget : '';
+      $('#mk-notes').value = km ? (km.notes || '') : '';
+
+      // model checkboxes
+      let allowed = null;
+      if (km && km.allowed_models && km.allowed_models !== '*') {
+        try { allowed = JSON.parse(km.allowed_models); } catch { allowed = []; }
+      }
+      const grid = $('#mk-models');
+      grid.innerHTML = (modelOptionsCache.length === 0
+        ? '<div class="dim" style="grid-column:1/-1;color:var(--fg-sub)">模型列表加载中或为空</div>'
+        : modelOptionsCache.filter(m => m.enabled).map(m => {
+          const checked = allowed ? allowed.includes(m.model_id) : false;
+          return '<label><input type="checkbox" value="' + escHTML(m.model_id) + '"' + (checked ? ' checked' : '') + '>' + escHTML(m.model_id) + '</label>';
+        }).join(''));
+
+      $('#modal-key-bg').classList.add('active');
+    }
+    $('#mk-cancel').addEventListener('click', () => $('#modal-key-bg').classList.remove('active'));
+    $('#modal-key-bg').addEventListener('click', (e) => {
+      if (e.target === $('#modal-key-bg')) $('#modal-key-bg').classList.remove('active');
+    });
+    $('#mk-save').addEventListener('click', async () => {
+      const checked = Array.from($('#mk-models').querySelectorAll('input:checked')).map(i => i.value);
+      const allowed_models = checked.length === 0 ? '*' : JSON.stringify(checked);
+      const body = {
+        owner: $('#mk-owner').value.trim(),
+        daily_budget: parseFloat($('#mk-budget').value) || 0,
+        allowed_models,
+        notes: $('#mk-notes').value.trim(),
+      };
+      try {
+        if (modalKeyEditing) {
+          // PATCH (don't send owner if unchanged — but simpler to send all)
+          const patchBody = {
+            owner: body.owner,
+            daily_budget: body.daily_budget,
+            allowed_models: body.allowed_models,
+            notes: body.notes,
+          };
+          await adminFetch('/admin/keys/' + encodeURIComponent(modalKeyEditing.key), {
+            method: 'PATCH',
+            body: patchBody,
+          });
+          $('#modal-key-bg').classList.remove('active');
+          fetchKeys();
+        } else {
+          if (!body.owner) { alert('持有者不能为空'); return; }
+          const created = await adminFetch('/admin/keys', { method: 'POST', body });
+          $('#modal-key-reveal-text').textContent = created.key;
+          $('#modal-key-reveal').style.display = 'block';
+          $('#modal-key-title').textContent = '密钥已创建';
+          fetchKeys();
+        }
+      } catch (e) {
+        alert('保存失败：' + e.message);
+      }
+    });
+
+    // =================================================
+    // MODELS
+    // =================================================
+    async function fetchModels() {
+      try {
+        const list = await adminFetch('/admin/models');
+        renderModels(list || []);
+      } catch (e) {
+        $('#models-table').innerHTML = '<tbody><tr><td class="empty" colspan="4">' + escHTML(e.message) + '</td></tr></tbody>';
+      }
+    }
+    function renderModels(rows) {
+      $('#models-count').textContent = rows.length + ' 个';
+      const t = $('#models-table');
+      if (rows.length === 0) {
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="4">尚未同步到模型列表</td></tr></tbody>';
+        return;
+      }
+      let html = '<thead><tr>';
+      html += '<th>模型 ID</th><th>状态</th><th>首次见到</th><th>最近见到</th>';
+      html += '</tr></thead><tbody>';
+      for (const m of rows) {
+        html += '<tr>';
+        html += '<td class="k">' + escHTML(m.model_id) + '</td>';
+        html += '<td><div class="toggle ' + (m.enabled ? 'on' : '') + '" data-id="' + escHTML(m.model_id) + '"></div></td>';
+        html += '<td class="dim">' + escHTML(fmtTime(m.first_seen_at)) + '</td>';
+        html += '<td class="dim">' + escHTML(fmtTime(m.last_seen_at)) + '</td>';
+        html += '</tr>';
+      }
+      html += '</tbody>';
+      t.innerHTML = html;
+
+      t.querySelectorAll('.toggle').forEach(tg => {
+        tg.addEventListener('click', async () => {
+          const id = tg.dataset.id;
+          const nextEnabled = !tg.classList.contains('on');
+          tg.classList.toggle('on'); // optimistic
+          try {
+            await adminFetch('/admin/models/' + encodeURIComponent(id), {
+              method: 'PATCH', body: { enabled: nextEnabled },
+            });
+          } catch (e) {
+            tg.classList.toggle('on'); // rollback
+            alert('切换失败：' + e.message);
+          }
+        });
+      });
+    }
+
+    // =================================================
+    // LOGS
+    // =================================================
+    let logsCursor = 0;
+    let logsRows = [];
+
+    $('#lg-apply').addEventListener('click', () => { logsCursor = 0; logsRows = []; fetchLogs(); });
+    $('#logs-more').addEventListener('click', () => fetchLogs(true));
+
+    async function fillLogsFilterSelects() {
+      // 用 stats 接口的 by_proxy_key / by_model 来填，避免再做一个轻量列表接口
+      try {
+        const data = await adminFetch('/admin/stats');
+        populateSelect('#lg-proxy-key', data.by_proxy_key, $('#lg-proxy-key').value);
+        populateSelect('#lg-model',     data.by_model,     $('#lg-model').value);
+      } catch (e) {}
+    }
+
+    function logsParams() {
+      const p = new URLSearchParams();
+      const pk = $('#lg-proxy-key').value, md = $('#lg-model').value;
+      const st = $('#lg-status').value, lim = $('#lg-limit').value;
+      if (pk) p.set('proxy_key', pk);
+      if (md) p.set('model', md);
+      if (st) p.set('status', st);
+      if (lim) p.set('limit', lim);
+      if (logsCursor) p.set('before_id', logsCursor);
+      return p;
+    }
+
+    async function fetchLogs(more) {
+      if (!tokenInput.value.trim()) {
+        $('#logs-table').innerHTML = '<tbody><tr><td class="empty" colspan="8">请输入管理员令牌</td></tr></tbody>';
+        return;
+      }
+      try {
+        const data = await adminFetch('/admin/logs?' + logsParams());
+        const fresh = data.logs || [];
+        if (more) logsRows = logsRows.concat(fresh);
+        else logsRows = fresh;
+        renderLogs(logsRows);
+        $('#logs-count').textContent = logsRows.length + ' 条';
+        if (fresh.length > 0) {
+          logsCursor = fresh[fresh.length - 1].id;
+          $('#logs-more').style.display = (fresh.length >= parseInt($('#lg-limit').value || '100', 10)) ? '' : 'none';
+        } else {
+          $('#logs-more').style.display = 'none';
+        }
+      } catch (e) {
+        $('#logs-table').innerHTML = '<tbody><tr><td class="empty" colspan="8">' + escHTML(e.message) + '</td></tr></tbody>';
+      }
+    }
+
+    function renderLogs(rows) {
+      const t = $('#logs-table');
+      if (rows.length === 0) {
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="8">暂无匹配记录</td></tr></tbody>';
+        return;
+      }
+      let html = '<thead><tr>';
+      html += '<th>时刻</th><th>密钥</th><th>模型</th><th class="num">状态</th><th class="num">输入/输出</th><th class="num">命中</th><th class="num">成本</th><th class="num">延迟</th>';
+      html += '</tr></thead><tbody>';
+      for (const r of rows) {
+        const ok = r.status >= 200 && r.status < 300;
+        const inOut = fmtInt(r.input_tokens) + ' / ' + fmtInt(r.output_tokens);
+        const total = r.input_tokens + r.cache_read;
+        const hit = total > 0 ? r.cache_read / total : 0;
+        html += '<tr class="clickable" data-id="' + r.id + '">';
+        html += '<td class="dim">' + escHTML(fmtTime(r.time)) + '</td>';
+        html += '<td class="k mono" title="' + escHTML(r.proxy_key) + '">' + escHTML(truncKey(r.proxy_key)) + '</td>';
+        html += '<td class="dim">' + escHTML(r.model || '—') + '</td>';
+        html += '<td class="num"><span class="status-pill ' + (ok ? 'ok' : 'err') + '">' + r.status + '</span></td>';
+        html += '<td class="num dim">' + escHTML(inOut) + '</td>';
+        html += '<td class="num ' + (hit > 0 ? 'hit' : 'zero') + '">' + fmtPct(hit) + '</td>';
+        html += '<td class="num ' + (r.cost_usd > 0 ? 'cost' : 'zero') + '">' + fmtCost(r.cost_usd) + '</td>';
+        html += '<td class="num dim">' + fmtInt(r.latency_ms) + 'ms</td>';
+        html += '</tr>';
+      }
+      html += '</tbody>';
+      t.innerHTML = html;
+      t.querySelectorAll('tr[data-id]').forEach(tr => {
+        tr.addEventListener('click', () => openLogDetail(tr.dataset.id));
+      });
+    }
+
+    async function openLogDetail(id) {
+      try {
+        const d = await adminFetch('/admin/logs/' + id);
+        $('#drw-id').textContent = '#' + d.id + ' · ' + fmtTime(d.time);
+        const kv = $('#drw-kv');
+        const ok = d.status >= 200 && d.status < 300;
+        const rows = [
+          ['代理密钥', d.proxy_key],
+          ['Anthropic ID', d.request_id || '—'],
+          ['上游 request-id', d.http_request_id || '—'],
+          ['端点', d.method + ' ' + d.endpoint],
+          ['状态', '<span class="status-pill ' + (ok ? 'ok' : 'err') + '">' + d.status + '</span>'
+            + (d.stop_reason ? ' <span class="dim" style="margin-left:8px">' + escHTML(d.stop_reason) + '</span>' : '')],
+          ['模型', d.model || '—'],
+          ['输入 / 输出', fmtInt(d.input_tokens) + ' / ' + fmtInt(d.output_tokens)],
+          ['缓存读', fmtInt(d.cache_read)],
+          ['缓存写 (5m / 1h)', fmtInt(d.cache_create_5m) + ' / ' + fmtInt(d.cache_create_1h)],
+          ['网络搜索', fmtInt(d.web_search_count)],
+          ['成本', fmtCost(d.cost_usd)],
+          ['延迟', fmtInt(d.latency_ms) + ' ms'],
+          ['流式', d.streaming ? '是' : '否'],
+          ['客户端', escHTML(d.client_ip || '—')],
+          ['User-Agent', escHTML(d.user_agent || '—')],
+        ];
+        kv.innerHTML = rows.map(([k,v]) => '<dt>' + escHTML(k) + '</dt><dd>' + v + '</dd>').join('');
+        $('#drw-req').textContent  = d.request_body  || (ok ? '(成功请求不保存 body)' : '(未捕获)');
+        $('#drw-resp').textContent = d.response_body || (ok ? '(成功请求不保存 body)' : '(未捕获)');
+        // try to pretty-print JSON
+        ['#drw-req','#drw-resp'].forEach(sel => {
+          const el = $(sel);
+          const txt = el.textContent.trim();
+          if (txt.startsWith('{') || txt.startsWith('[')) {
+            try { el.textContent = JSON.stringify(JSON.parse(txt), null, 2); } catch {}
+          }
+        });
+        $('#drawer-bg').classList.add('active');
+      } catch (e) { alert('读取失败：' + e.message); }
+    }
+    $('#drw-close').addEventListener('click', () => $('#drawer-bg').classList.remove('active'));
+    $('#drawer-bg').addEventListener('click', (e) => {
+      if (e.target === $('#drawer-bg')) $('#drawer-bg').classList.remove('active');
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        $('#modal-key-bg').classList.remove('active');
+        $('#drawer-bg').classList.remove('active');
+      }
+    });
+
+    // ---------- bootstrap ----------
+    if (!location.hash) location.hash = '#/overview';
+    applyRoute();
+  })();
+  </script>
+</body>
+</html>
