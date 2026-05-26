@@ -10,6 +10,8 @@
 //   config.go  .env 解析 + Config
 //   usage.go   UsageRecord + usage 解析 + 入库
 //   tee.go     响应 body 旁路
+//   compat.go  OpenAI Chat Completions 兼容层
+//   compat_convert.go  OpenAI ↔ Anthropic 格式转换
 //   proxy.go   反向代理装配 + 转发 / v1/models 拦截 handler
 //   admin.go   /admin/* JSON API
 //   keys.go    proxy key 缓存
@@ -22,6 +24,7 @@ import (
 	_ "embed"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -87,7 +90,19 @@ func main() {
 		_, _ = w.Write(dashboardHTML)
 	})
 
-	mux.HandleFunc("/v1/models", modelsListHandler(rp))
+	// OpenAI 兼容层
+	mux.HandleFunc("/v1/chat/completions", openaiChatHandler(cfg))
+
+	// /v1/models: 按 auth 风格分发——Bearer → OpenAI 格式，x-api-key → Anthropic 格式
+	oaiModels := openaiModelsHandler()
+	anthModels := modelsListHandler(rp)
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") == "" && strings.HasPrefix(r.Header.Get("authorization"), "Bearer ") {
+			oaiModels.ServeHTTP(w, r)
+			return
+		}
+		anthModels.ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/v1/models/", modelDetailHandler(rp))
 	mux.HandleFunc("/", forwardHandler(rp))
 

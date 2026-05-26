@@ -144,6 +144,19 @@ func (r *ModelRegistry) RunPeriodic(realKey string, interval time.Duration) {
 	}()
 }
 
+// FilteredModelIDs 返回该 key 可用的模型 ID 列表，供 OpenAI 兼容层用。
+func (r *ModelRegistry) FilteredModelIDs(allowed func(string) bool) []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var ids []string
+	for _, e := range r.fullList {
+		if r.valid[e.ID] && allowed(e.ID) {
+			ids = append(ids, e.ID)
+		}
+	}
+	return ids
+}
+
 // FilteredList 返回"该 key 实际可用模型"的 Anthropic /v1/models 格式响应。
 // 过滤条件：curated.enabled = true AND allowed(id) = true。
 // 缓存为空时返回 nil，调用方应回落到原始上游转发。
