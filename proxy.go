@@ -40,6 +40,20 @@ func writeAnthropicError(w http.ResponseWriter, status int, errType, message str
 	})
 }
 
+// extractProxyKey 兼容两种鉴权 header：
+//   - x-api-key（Anthropic 官方 SDK 用）
+//   - Authorization: Bearer <key>（OpenAI 风格，cc-switch 之类的工具会用这种来测连通性）
+// 注意：Director 阶段会把这两个 header 都删掉再换成真实 key，所以这里只管接收。
+func extractProxyKey(r *http.Request) string {
+	if k := r.Header.Get("x-api-key"); k != "" {
+		return k
+	}
+	if auth := r.Header.Get("authorization"); strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return ""
+}
+
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("x-forwarded-for"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i > 0 {
@@ -148,7 +162,7 @@ func modelsListHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 			writeAnthropicError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 			return
 		}
-		proxyKey := r.Header.Get("x-api-key")
+		proxyKey := extractProxyKey(r)
 		keyMeta, ok := keys.Get(proxyKey)
 		if !ok {
 			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid proxy key")
@@ -170,7 +184,7 @@ func modelsListHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 // modelDetailHandler 处理 /v1/models/{id}：allowlist 通不过的模型直接 404，否则透传。
 func modelDetailHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		proxyKey := r.Header.Get("x-api-key")
+		proxyKey := extractProxyKey(r)
 		keyMeta, ok := keys.Get(proxyKey)
 		if !ok {
 			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid proxy key")
@@ -194,7 +208,7 @@ func modelDetailHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 // 一切 OK 才把请求交给反向代理。
 func forwardHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		proxyKey := r.Header.Get("x-api-key")
+		proxyKey := extractProxyKey(r)
 		keyMeta, ok := keys.Get(proxyKey)
 		if !ok {
 			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid proxy key")
