@@ -786,6 +786,53 @@ func main() {
 		_, _ = w.Write(dashboardHTML)
 	})
 
+	// 拦截 /v1/models：让客户端 SDK 看到的列表 = curated.enabled ∩ key.AllowedModels。
+	// 不然客户端列出全部模型，调用时却被 allowlist 拒，体验割裂。
+	// 注册表为空时回落到上游透传（fail-open）。
+	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeAnthropicError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+			return
+		}
+		proxyKey := r.Header.Get("x-api-key")
+		keyMeta, ok := keys.Get(proxyKey)
+		if !ok {
+			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid proxy key")
+			return
+		}
+		body := modelRegistry.FilteredList(func(id string) bool {
+			return keyMeta.ModelAllowed(id)
+		})
+		if body == nil {
+			// 缓存还没起来，让请求走原始反向代理（catch-all 会处理）
+			rp.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write(body)
+	})
+
+	// /v1/models/<id> 详情：allowlist 通不过的模型直接 404，否则透传上游。
+	mux.HandleFunc("/v1/models/", func(w http.ResponseWriter, r *http.Request) {
+		proxyKey := r.Header.Get("x-api-key")
+		keyMeta, ok := keys.Get(proxyKey)
+		if !ok {
+			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid proxy key")
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/models/")
+		if id == "" {
+			rp.ServeHTTP(w, r)
+			return
+		}
+		if !modelRegistry.IsKnown(id) || !keyMeta.ModelAllowed(id) {
+			writeAnthropicError(w, http.StatusNotFound, "not_found_error",
+				fmt.Sprintf("model not available via this proxy: %s", id))
+			return
+		}
+		rp.ServeHTTP(w, r)
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		proxyKey := r.Header.Get("x-api-key")
 		keyMeta, ok := keys.Get(proxyKey)

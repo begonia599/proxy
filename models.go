@@ -6,6 +6,10 @@
 //
 // 失败优雅降级：注册表为空时 IsKnown 返回 true（fail-open），
 // 让真正的校验回落到 Anthropic 本身。
+//
+// 同时缓存上游 /v1/models 完整响应（每个 entry 的原始 JSON），
+// 用来给 FilteredList 拼"该 key 实际能用的模型列表"，避免客户端 SDK
+// 列模型看到全部、调用时被拒的混乱。
 package main
 
 import (
@@ -16,9 +20,16 @@ import (
 	"time"
 )
 
+// modelEntry 一个上游模型条目，保留原始 JSON 用于按需重发。
+type modelEntry struct {
+	ID  string
+	Raw json.RawMessage
+}
+
 type ModelRegistry struct {
 	mu         sync.RWMutex
 	valid      map[string]bool
+	fullList   []modelEntry // 保留上游顺序，给 FilteredList 用
 	lastUpdate time.Time
 	store      *Store
 }
@@ -77,20 +88,28 @@ func (r *ModelRegistry) Refresh(realKey string) error {
 	}
 	defer resp.Body.Close()
 
+	// 用 RawMessage 保留每个 entry 的完整 JSON（含 display_name、capabilities 等），
+	// 给前端 SDK 反序列化用。
 	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+		Data []json.RawMessage `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return err
 	}
 
 	now := time.Now()
-	if r.store != nil {
-		for _, m := range body.Data {
-			if err := r.store.UpsertCuratedModel(m.ID, now); err != nil {
-				log.Printf("upsert curated model %s: %v", m.ID, err)
+	entries := make([]modelEntry, 0, len(body.Data))
+	for _, raw := range body.Data {
+		var meta struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &meta); err != nil || meta.ID == "" {
+			continue
+		}
+		entries = append(entries, modelEntry{ID: meta.ID, Raw: raw})
+		if r.store != nil {
+			if err := r.store.UpsertCuratedModel(meta.ID, now); err != nil {
+				log.Printf("upsert curated model %s: %v", meta.ID, err)
 			}
 		}
 	}
@@ -98,6 +117,14 @@ func (r *ModelRegistry) Refresh(realKey string) error {
 	if err := r.ReloadFromDB(); err != nil {
 		return err
 	}
+
+	// 上游偶尔返回 0 条（限流/瞬时故障），别用空列表覆盖好的缓存
+	if len(entries) > 0 {
+		r.mu.Lock()
+		r.fullList = entries
+		r.mu.Unlock()
+	}
+
 	r.mu.RLock()
 	n := len(r.valid)
 	r.mu.RUnlock()
@@ -115,4 +142,37 @@ func (r *ModelRegistry) RunPeriodic(realKey string, interval time.Duration) {
 			}
 		}
 	}()
+}
+
+// FilteredList 返回"该 key 实际可用模型"的 Anthropic /v1/models 格式响应。
+// 过滤条件：curated.enabled = true AND allowed(id) = true。
+// 缓存为空时返回 nil，调用方应回落到原始上游转发。
+func (r *ModelRegistry) FilteredList(allowed func(id string) bool) []byte {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.fullList) == 0 {
+		return nil
+	}
+
+	data := make([]json.RawMessage, 0, len(r.fullList))
+	var first, last string
+	for _, e := range r.fullList {
+		if !r.valid[e.ID] || !allowed(e.ID) {
+			continue
+		}
+		if first == "" {
+			first = e.ID
+		}
+		last = e.ID
+		data = append(data, e.Raw)
+	}
+
+	out := map[string]any{
+		"data":     data,
+		"has_more": false,
+		"first_id": first,
+		"last_id":  last,
+	}
+	b, _ := json.Marshal(out)
+	return b
 }
