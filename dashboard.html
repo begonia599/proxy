@@ -126,6 +126,8 @@
   }
   .auth button:hover { color: var(--hero); border-color: var(--hero); }
   .auth button:active { transform: translateY(1px); }
+  .auth button.auto-on { color: var(--hero); border-color: var(--hero); }
+  .auth button.auto-on:hover { color: var(--error); border-color: var(--error); }
 
   /* -------- nav -------- */
   nav.tabs {
@@ -592,6 +594,7 @@
         <div class="auth">
           <input type="password" id="token" placeholder="管理员令牌" autocomplete="off" spellcheck="false">
           <button id="refresh" title="刷新">↻</button>
+          <button id="auto-refresh" title="自动刷新 10s">⏸</button>
         </div>
       </div>
     </header>
@@ -891,6 +894,36 @@
     function reloadCurrent() { loadRoute(currentRoute()); }
 
     $('#refresh').addEventListener('click', reloadCurrent);
+
+    // ---------- auto-refresh ----------
+    const AUTO_INTERVAL = 10;
+    let autoTimer = null;
+    let autoCountdown = AUTO_INTERVAL;
+    const autoBtn = $('#auto-refresh');
+
+    function startAutoRefresh() {
+      autoCountdown = AUTO_INTERVAL;
+      autoBtn.classList.add('auto-on');
+      autoBtn.textContent = autoCountdown + 's';
+      autoTimer = setInterval(() => {
+        autoCountdown--;
+        if (autoCountdown <= 0) {
+          reloadCurrent();
+          autoCountdown = AUTO_INTERVAL;
+        }
+        autoBtn.textContent = autoCountdown + 's';
+      }, 1000);
+    }
+    function stopAutoRefresh() {
+      clearInterval(autoTimer);
+      autoTimer = null;
+      autoBtn.classList.remove('auto-on');
+      autoBtn.textContent = '⏸';
+    }
+    autoBtn.addEventListener('click', () => {
+      if (autoTimer) stopAutoRefresh(); else startAutoRefresh();
+    });
+    startAutoRefresh();
 
     // =================================================
     // OVERVIEW
