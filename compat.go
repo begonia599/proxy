@@ -100,7 +100,7 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 			return
 		}
-		if !modelRegistry.IsKnown(oaiReq.Model) {
+		if _, ok := modelRegistry.ResolveAlias(oaiReq.Model); !ok {
 			writeOpenAIError(w, http.StatusNotFound, "not_found_error",
 				"model not available via this proxy: "+oaiReq.Model)
 			go writeRecord(&UsageRecord{

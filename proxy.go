@@ -195,7 +195,7 @@ func modelDetailHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 			rp.ServeHTTP(w, r)
 			return
 		}
-		if !modelRegistry.IsKnown(id) || !keyMeta.ModelAllowed(id) {
+		if _, ok := modelRegistry.ResolveAlias(id); !ok || !keyMeta.ModelAllowed(id) {
 			writeAnthropicError(w, http.StatusNotFound, "not_found_error",
 				fmt.Sprintf("model not available via this proxy: %s", id))
 			return
@@ -300,7 +300,7 @@ func forwardHandler(cfg *Config, rp *httputil.ReverseProxy) http.HandlerFunc {
 					}
 					if peek.Model != "" {
 						r.Header.Set("x-proxy-req-model", peek.Model)
-						if !modelRegistry.IsKnown(peek.Model) {
+						if _, ok := modelRegistry.ResolveAlias(peek.Model); !ok {
 							known, _ := modelRegistry.Snapshot()
 							log.Printf("reject unknown model: %s (known: %d)", peek.Model, len(known))
 							writeAnthropicError(w, http.StatusNotFound, "not_found_error",

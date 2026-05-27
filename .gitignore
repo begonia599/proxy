@@ -6,6 +6,8 @@
 *.exe
 claude-proxy
 claude-proxy.bin
+claude-proxy.bak-*
+claude-proxy.new
 
 # SQLite database (contains generated proxy keys + request logs)
 *.db

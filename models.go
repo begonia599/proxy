@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -45,6 +46,54 @@ func (r *ModelRegistry) IsKnown(model string) bool {
 		return true // 注册表未初始化 → 不拦截
 	}
 	return r.valid[model]
+}
+
+// ResolveAlias 把模型短名（不含日期后缀）解析到 registry 中已知的完整 ID。
+// 规则：
+//  1. 已经是 registry 里的完整名（包括 Anthropic 偶尔返回的无日期短名如 claude-opus-4-7）→ 原样返回
+//  2. 否则匹配 "<model>-YYYYMMDD" 前缀，多个候选取字典序最大（最新日期）
+//  3. 都没有 → 返回 ok=false，调用方应当 404
+//  4. 注册表未初始化（fail-open）→ 原样返回，与 IsKnown 行为一致
+//
+// 仅做校验用途——调用方按 ok 判断是否拒绝，转发时仍透传客户端原始字符串，
+// 既保留 prompt cache 命中，也让 Anthropic 上游做最终解析。
+func (r *ModelRegistry) ResolveAlias(model string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if len(r.valid) == 0 {
+		return model, true
+	}
+	if r.valid[model] {
+		return model, true
+	}
+	prefix := model + "-"
+	var best string
+	for id := range r.valid {
+		if !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		rest := id[len(prefix):]
+		if len(rest) < 8 {
+			continue
+		}
+		allDigits := true
+		for i := 0; i < 8; i++ {
+			if rest[i] < '0' || rest[i] > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if !allDigits {
+			continue
+		}
+		if id > best {
+			best = id
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
 }
 
 func (r *ModelRegistry) Snapshot() ([]string, time.Time) {
