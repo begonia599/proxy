@@ -101,7 +101,7 @@ func buildReverseProxy(cfg *Config) *httputil.ReverseProxy {
 
 		r.Header.Del("x-api-key")
 		r.Header.Del("authorization")
-		r.Header.Set("x-api-key", cfg.RealKey)
+		r.Header.Set("x-api-key", cfg.GetRealKey())
 
 		if cfg.HideCC {
 			r.Header.Set("user-agent", "claude-proxy/0.2")
@@ -206,8 +206,16 @@ func modelDetailHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 
 // forwardHandler 是 catch-all 入口：校验 key、检查预算、peek 请求 body 做模型/fast 拦截，
 // 一切 OK 才把请求交给反向代理。
-func forwardHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
+func forwardHandler(cfg *Config, rp *httputil.ReverseProxy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 上游 key 缺失（被 admin 清掉或启动时就没配）就直接拒绝，省一次上游 401。
+		// Director 会注入空 key，请求必然失败；这里早返回更明确。
+		if cfg.GetRealKey() == "" {
+			writeAnthropicError(w, http.StatusServiceUnavailable, "api_error",
+				"upstream API key not configured on proxy")
+			return
+		}
+
 		proxyKey := extractProxyKey(r)
 		keyMeta, ok := keys.Get(proxyKey)
 		if !ok {

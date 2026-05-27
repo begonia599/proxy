@@ -66,10 +66,12 @@ func main() {
 	if err := modelRegistry.ReloadFromDB(); err != nil {
 		log.Printf("model registry initial DB load failed: %v", err)
 	}
-	if err := modelRegistry.Refresh(cfg.RealKey); err != nil {
-		log.Printf("initial model registry load failed: %v (fail-open, will retry in 30m)", err)
+	if k := cfg.GetRealKey(); k != "" {
+		if err := modelRegistry.Refresh(k); err != nil {
+			log.Printf("initial model registry load failed: %v (fail-open, will retry in 30m)", err)
+		}
 	}
-	modelRegistry.RunPeriodic(cfg.RealKey, 30*time.Minute)
+	modelRegistry.RunPeriodic(cfg.GetRealKey, 30*time.Minute)
 
 	rp := buildReverseProxy(cfg)
 
@@ -83,6 +85,7 @@ func main() {
 	mux.HandleFunc("/admin/logs", adminLogsHandler(cfg))
 	mux.HandleFunc("/admin/logs/", adminLogsHandler(cfg))
 	mux.HandleFunc("/admin/timeseries", adminTimeseriesHandler(cfg))
+	mux.HandleFunc("/admin/config", adminConfigHandler(cfg))
 	mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
 		// 仪表盘 HTML 本身不含敏感数据，token 在浏览器里输入。
 		w.Header().Set("content-type", "text/html; charset=utf-8")
@@ -104,7 +107,7 @@ func main() {
 		anthModels.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("/v1/models/", modelDetailHandler(rp))
-	mux.HandleFunc("/", forwardHandler(rp))
+	mux.HandleFunc("/", forwardHandler(cfg, rp))
 
 	log.Printf("claude-proxy listening on %s, upstream %s", listenAddr, upstreamURL)
 	log.Printf("admin token: %s", cfg.AdminToken)

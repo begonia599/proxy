@@ -43,6 +43,11 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "only POST is allowed")
 			return
 		}
+		if cfg.GetRealKey() == "" {
+			writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
+				"upstream API key not configured on proxy")
+			return
+		}
 
 		startTime := time.Now()
 
@@ -163,7 +168,7 @@ func callAnthropic(cfg *Config, body []byte) (*http.Response, error) {
 		return nil, err
 	}
 	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-api-key", cfg.RealKey)
+	req.Header.Set("x-api-key", cfg.GetRealKey())
 	req.Header.Set("anthropic-version", "2023-06-01")
 	if cfg.HideCC {
 		req.Header.Set("user-agent", "claude-proxy/0.2")

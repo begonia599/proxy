@@ -604,6 +604,7 @@
       <a href="#/keys" data-route="keys"><span class="cn">密钥</span>KEYS</a>
       <a href="#/models" data-route="models"><span class="cn">模型</span>MODELS</a>
       <a href="#/logs" data-route="logs"><span class="cn">日志</span>LOGS</a>
+      <a href="#/config" data-route="config"><span class="cn">设置</span>CONFIG</a>
     </nav>
 
     <!-- ============ OVERVIEW ============ -->
@@ -749,6 +750,36 @@
       </div>
     </section>
 
+    <!-- ============ CONFIG ============ -->
+    <section id="view-config" class="view">
+      <div class="section-head" style="margin-top: 8px">
+        <h2>上游密钥</h2>
+        <span class="h-serif">Anthropic key</span>
+        <span class="rule"></span>
+      </div>
+      <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
+        发往 api.anthropic.com 的 <code>x-api-key</code>。保存即写入服务器 .env (mode 0600)。出于安全，只能看到最后 4 位。
+      </p>
+
+      <div style="max-width: 640px; padding: 24px; border: 1px solid var(--rule); border-radius: 2px; background: var(--bg-soft)">
+        <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:20px">
+          <span style="font-size:10px;letter-spacing:0.08em;color:var(--fg-dim)">当前</span>
+          <span id="cfg-masked" style="font-family:ui-monospace,Menlo,monospace;font-size:14px;color:var(--fg)">—</span>
+          <span id="cfg-length" style="font-size:11px;color:var(--fg-sub);margin-left:auto"></span>
+        </div>
+
+        <div class="field" style="margin-bottom:16px">
+          <label>新 key（替换当前值）</label>
+          <input id="cfg-new-key" type="password" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false">
+        </div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center">
+          <span id="cfg-status" style="font-size:11px;color:var(--fg-dim);margin-right:auto"></span>
+          <button class="btn danger" id="cfg-clear" title="清除后代理将拒绝转发请求，直到再次设置">清除</button>
+          <button class="btn" id="cfg-save">保存新 key</button>
+        </div>
+      </div>
+    </section>
+
     <footer>
       <span>本机 · 127.0.0.1:8787</span>
       <span class="serif">一份透明的账簿。</span>
@@ -890,6 +921,7 @@
       else if (route === 'keys') { fetchKeys(); }
       else if (route === 'models') { fetchModels(); }
       else if (route === 'logs') { logsCursor = 0; logsRows = []; fetchLogs(); fillLogsFilterSelects(); }
+      else if (route === 'config') { fetchConfig(); }
     }
     function reloadCurrent() { loadRoute(currentRoute()); }
 
@@ -1510,6 +1542,60 @@
       if (e.key === 'Escape') {
         $('#modal-key-bg').classList.remove('active');
         $('#drawer-bg').classList.remove('active');
+      }
+    });
+
+    // =================================================
+    // CONFIG (upstream key)
+    // =================================================
+    async function fetchConfig() {
+      if (!tokenInput.value.trim()) {
+        $('#cfg-masked').textContent = '请输入管理员令牌';
+        $('#cfg-length').textContent = '';
+        return;
+      }
+      try {
+        const data = await adminFetch('/admin/config');
+        if (data.has_key) {
+          $('#cfg-masked').textContent = data.masked;
+          $('#cfg-length').textContent = data.length + ' 字符';
+        } else {
+          $('#cfg-masked').textContent = '（未设置）';
+          $('#cfg-length').textContent = '';
+        }
+        $('#cfg-status').textContent = '';
+      } catch (e) {
+        $('#cfg-masked').textContent = '加载失败';
+        $('#cfg-status').textContent = e.message;
+      }
+    }
+
+    $('#cfg-save').addEventListener('click', async () => {
+      const v = $('#cfg-new-key').value.trim();
+      if (!v) { $('#cfg-status').textContent = '请先填写新 key'; return; }
+      if (!v.startsWith('sk-ant-')) {
+        if (!confirm('该 key 不以 sk-ant- 开头，确认提交吗？')) return;
+      }
+      $('#cfg-status').textContent = '保存中…';
+      try {
+        await adminFetch('/admin/config', { method: 'PUT', body: { upstream_key: v } });
+        $('#cfg-new-key').value = '';
+        $('#cfg-status').textContent = '已更新';
+        fetchConfig();
+      } catch (e) {
+        $('#cfg-status').textContent = '失败：' + e.message;
+      }
+    });
+
+    $('#cfg-clear').addEventListener('click', async () => {
+      if (!confirm('清除上游 key 后，代理将拒绝所有转发请求。确认清除？')) return;
+      $('#cfg-status').textContent = '清除中…';
+      try {
+        await adminFetch('/admin/config', { method: 'DELETE' });
+        $('#cfg-status').textContent = '已清除';
+        fetchConfig();
+      } catch (e) {
+        $('#cfg-status').textContent = '失败：' + e.message;
       }
     });
 

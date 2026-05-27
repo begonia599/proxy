@@ -132,12 +132,19 @@ func (r *ModelRegistry) Refresh(realKey string) error {
 	return nil
 }
 
-func (r *ModelRegistry) RunPeriodic(realKey string, interval time.Duration) {
+// RunPeriodic 每 interval 调一次 Refresh。
+// 接受 getKey 而非裸 string，是因为上游 key 可能在运行时被 admin 热更新——
+// 闭包持有的旧值会导致刷新拿不到新 key 的可见模型。空 key 时跳过本轮。
+func (r *ModelRegistry) RunPeriodic(getKey func() string, interval time.Duration) {
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
-			if err := r.Refresh(realKey); err != nil {
+			k := getKey()
+			if k == "" {
+				continue
+			}
+			if err := r.Refresh(k); err != nil {
 				log.Printf("model registry refresh: %v", err)
 			}
 		}
