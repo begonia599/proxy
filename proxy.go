@@ -195,7 +195,9 @@ func modelDetailHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 			rp.ServeHTTP(w, r)
 			return
 		}
-		if _, ok := modelRegistry.ResolveAlias(id); !ok || !keyMeta.ModelAllowed(id) {
+		// ResolveAlias 解析短名到完整 ID，用完整 ID 查白名单（兼容短名白名单场景）。
+		canonical, ok := modelRegistry.ResolveAlias(id)
+		if !ok || !keyMeta.ModelAllowed(canonical) {
 			writeAnthropicError(w, http.StatusNotFound, "not_found_error",
 				fmt.Sprintf("model not available via this proxy: %s", id))
 			return
@@ -300,7 +302,8 @@ func forwardHandler(cfg *Config, rp *httputil.ReverseProxy) http.HandlerFunc {
 					}
 					if peek.Model != "" {
 						r.Header.Set("x-proxy-req-model", peek.Model)
-						if _, ok := modelRegistry.ResolveAlias(peek.Model); !ok {
+						canonical, ok := modelRegistry.ResolveAlias(peek.Model)
+						if !ok {
 							known, _ := modelRegistry.Snapshot()
 							log.Printf("reject unknown model: %s (known: %d)", peek.Model, len(known))
 							writeAnthropicError(w, http.StatusNotFound, "not_found_error",
@@ -318,7 +321,7 @@ func forwardHandler(cfg *Config, rp *httputil.ReverseProxy) http.HandlerFunc {
 							}, raw, nil)
 							return
 						}
-						if !keyMeta.ModelAllowed(peek.Model) {
+						if !keyMeta.ModelAllowed(canonical) {
 							log.Printf("reject by allowlist: key=%s owner=%s model=%s allowed=%s",
 								proxyKey, keyMeta.Owner, peek.Model, keyMeta.AllowedModels)
 							writeAnthropicError(w, http.StatusForbidden, "permission_error",

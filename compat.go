@@ -100,7 +100,11 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 			return
 		}
-		if _, ok := modelRegistry.ResolveAlias(oaiReq.Model); !ok {
+		// ResolveAlias：接受短名（如 claude-haiku-4-5）并解析到 registry 里的完整 ID，
+		// 用完整 ID 查白名单，避免 key 白名单写完整 ID 时短名被误拒。
+		// 转发时仍透传客户端原始模型名，让 Anthropic 做最终解析（保 prompt cache）。
+		canonical, ok := modelRegistry.ResolveAlias(oaiReq.Model)
+		if !ok {
 			writeOpenAIError(w, http.StatusNotFound, "not_found_error",
 				"model not available via this proxy: "+oaiReq.Model)
 			go writeRecord(&UsageRecord{
@@ -110,7 +114,7 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 			}, raw, nil)
 			return
 		}
-		if !keyMeta.ModelAllowed(oaiReq.Model) {
+		if !keyMeta.ModelAllowed(canonical) {
 			writeOpenAIError(w, http.StatusForbidden, "permission_error",
 				"this proxy key is not permitted to use model: "+oaiReq.Model)
 			go writeRecord(&UsageRecord{
