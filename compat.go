@@ -153,7 +153,7 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 		}
 
 		if oaiReq.Stream && upResp.StatusCode == 200 {
-			relayStream(w, upResp, rec, raw)
+			relayStream(w, r, upResp, rec, raw)
 		} else {
 			relayNonStream(w, upResp, rec, raw)
 		}
@@ -216,7 +216,7 @@ func relayNonStream(w http.ResponseWriter, upResp *http.Response, rec *UsageReco
 
 // ── 流式 SSE 中继 ──
 
-func relayStream(w http.ResponseWriter, upResp *http.Response, rec *UsageRecord, reqBody []byte) {
+func relayStream(w http.ResponseWriter, r *http.Request, upResp *http.Response, rec *UsageRecord, reqBody []byte) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "server_error", "streaming not supported")
@@ -236,7 +236,13 @@ func relayStream(w http.ResponseWriter, upResp *http.Response, rec *UsageRecord,
 	scanner.Buffer(make([]byte, 1<<20), 8<<20)
 
 	var eventType string
+	ctx := r.Context()
 	for scanner.Scan() {
+		// 客户端断开 → 停止中继，避免对已关闭的连接写入
+		if err := ctx.Err(); err != nil {
+			break
+		}
+
 		line := scanner.Text()
 
 		// tee 给 usage 解析用（限 4MB）
@@ -269,13 +275,22 @@ func relayStream(w http.ResponseWriter, upResp *http.Response, rec *UsageRecord,
 		}
 	}
 
-	// 终止标记
-	fmt.Fprintf(w, "data: [DONE]\n\n")
-	flusher.Flush()
+	// scanner.Err 非空表示上游中断/读失败；客户端断开时 ctx.Err() 非 nil。
+	// 两种情况都说明流不完整，记录里标记一下，但仍尝试用已收到的数据解析 usage。
+	streamBroken := scanner.Err() != nil || ctx.Err() != nil
+
+	// 只有正常结束才发 [DONE]；中断时不发，让客户端感知异常
+	if !streamBroken {
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
 
 	// 用量入库
 	rec.LatencyMs = time.Since(rec.Time).Milliseconds()
 	parseUsageSSE(teeBuf.Bytes(), rec)
+	if streamBroken && rec.StopReason == "" {
+		rec.StopReason = "proxy_stream_interrupted"
+	}
 	go writeRecord(rec, reqBody, teeBuf.Bytes())
 }
 
@@ -295,9 +310,13 @@ func openaiModelsHandler() http.HandlerFunc {
 			return
 		}
 
-		ids := modelRegistry.FilteredModelIDs(func(id string) bool {
-			return keyMeta.ModelAllowed(id)
-		})
+		allowed := func(id string) bool { return keyMeta.ModelAllowed(id) }
+		ids := modelRegistry.FilteredModelIDs(allowed)
+
+		// registry 未加载（fail-open）→ 直接问上游，再按 key 白名单过滤后转 OpenAI 格式
+		if ids == nil {
+			ids = fetchUpstreamModelIDs(allowed)
+		}
 
 		now := time.Now().Unix()
 		entries := make([]oaiModelEntry, len(ids))
@@ -316,4 +335,31 @@ func openaiModelsHandler() http.HandlerFunc {
 			Data:   entries,
 		})
 	}
+}
+
+// fetchUpstreamModelIDs registry 未加载时的回落：直接拉上游 /v1/models，
+// 返回通过 allowed 过滤后的模型 ID 列表。失败返回 nil。
+func fetchUpstreamModelIDs(allowed func(string) bool) []string {
+	resp, err := compatClient.Get(upstreamURL + "/v1/models?limit=100")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil
+	}
+
+	var ids []string
+	for _, m := range body.Data {
+		if m.ID != "" && allowed(m.ID) {
+			ids = append(ids, m.ID)
+		}
+	}
+	return ids
 }

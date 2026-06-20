@@ -153,13 +153,20 @@ type anthropicContentBlock struct {
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   any             `json:"content,omitempty"`
-	Source    *imageSource    `json:"source,omitempty"`
+	Source    any             `json:"source,omitempty"` // base64Source | urlSource
 }
 
-type imageSource struct {
-	Type      string `json:"type"`
+// base64Source 用于 base64 编码的图片/文档源
+type base64Source struct {
+	Type      string `json:"type"`       // "base64"
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
+}
+
+// urlSource 用于 URL 形式的图片源——注意字段是 url 不是 data
+type urlSource struct {
+	Type string `json:"type"` // "url"
+	URL  string `json:"url"`
 }
 
 type anthropicTool struct {
@@ -401,21 +408,14 @@ func convertImageURL(url string) *anthropicContentBlock {
 		meta := strings.TrimPrefix(parts[0], "data:")
 		meta = strings.TrimSuffix(meta, ";base64")
 		return &anthropicContentBlock{
-			Type: "image",
-			Source: &imageSource{
-				Type:      "base64",
-				MediaType: meta,
-				Data:      parts[1],
-			},
+			Type:   "image",
+			Source: base64Source{Type: "base64", MediaType: meta, Data: parts[1]},
 		}
 	}
-	// HTTP(S) URL → Anthropic url source
+	// HTTP(S) URL → Anthropic url source（字段是 url，不是 data）
 	return &anthropicContentBlock{
-		Type: "image",
-		Source: &imageSource{
-			Type: "url",
-			Data: url,
-		},
+		Type:   "image",
+		Source: urlSource{Type: "url", URL: url},
 	}
 }
 
@@ -432,11 +432,17 @@ func convertAssistantMessage(m oaiMessage) any {
 		blocks = append(blocks, anthropicContentBlock{Type: "text", Text: text})
 	}
 	for _, tc := range m.ToolCalls {
+		// OpenAI 的 arguments 是 JSON 字符串；Anthropic 的 input 是 JSON 对象。
+		// 空字符串会导致 omitempty 丢字段（Anthropic 要求 input 存在），补成 {}。
+		args := tc.Function.Arguments
+		if strings.TrimSpace(args) == "" {
+			args = "{}"
+		}
 		blocks = append(blocks, anthropicContentBlock{
 			Type:  "tool_use",
 			ID:    tc.ID,
 			Name:  tc.Function.Name,
-			Input: json.RawMessage(tc.Function.Arguments),
+			Input: json.RawMessage(args),
 		})
 	}
 	return blocks
@@ -556,7 +562,8 @@ type streamState struct {
 	id        string
 	model     string
 	created   int64
-	toolIndex int // 当前 tool_calls 下标
+	toolIndex int      // 当前 tool_calls 下标
+	curBlock  string   // 当前 block 类型（text / tool_use），用于 content_block_stop 判断
 }
 
 // convertSSEEvent 将单条 Anthropic SSE 事件转成零或多条 OpenAI chunk。
@@ -593,6 +600,7 @@ func convertSSEEvent(eventType string, payload []byte, st *streamState) []oaiCha
 		}
 		if ev.ContentBlock.Type == "tool_use" {
 			idx := st.toolIndex
+			st.curBlock = "tool_use"
 			chunk := makeChunk(st, &oaiOutMsg{
 				ToolCalls: []oaiToolCall{{
 					Index: &idx,
@@ -606,6 +614,7 @@ func convertSSEEvent(eventType string, payload []byte, st *streamState) []oaiCha
 			}, nil)
 			return []oaiChatResponse{chunk}
 		}
+		st.curBlock = ev.ContentBlock.Type
 		return nil
 
 	case "content_block_delta":
@@ -643,8 +652,11 @@ func convertSSEEvent(eventType string, payload []byte, st *streamState) []oaiCha
 		if json.Unmarshal(payload, &ev) != nil {
 			return nil
 		}
-		// tool_use block 结束时推进 toolIndex
-		st.toolIndex++
+		// 只有 tool_use block 结束时才推进 toolIndex（text block 不影响）
+		if st.curBlock == "tool_use" {
+			st.toolIndex++
+		}
+		st.curBlock = ""
 		return nil
 
 	case "message_delta":
