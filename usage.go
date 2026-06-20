@@ -19,7 +19,9 @@ type UsageRecord struct {
 	Endpoint       string
 	Method         string
 	Status         int
-	Model          string
+	Model          string // 下游请求的模型名（逻辑名或具体名）
+	Provider       string // 路由命中的上游服务商名（多上游归因）
+	UpstreamModel  string // 上游真实模型名
 	InputTokens    int
 	OutputTokens   int
 	CacheCreate5m  int
@@ -157,8 +159,17 @@ func parseUsageSSE(body []byte, rec *UsageRecord) {
 			}
 			ev.Message.Usage.toRecord(rec)
 		case "message_delta":
+			// OpenAI 格式上游经出站翻译后，真实 input_tokens 只在收尾的
+			// message_delta usage 里给出（message_start 里是 0）。所以这里也要读
+			// input/cache，用 >0 保护避免覆盖真 Anthropic 上游 message_start 的值。
+			if ev.Usage.InputTokens > 0 {
+				rec.InputTokens = ev.Usage.InputTokens
+			}
 			if ev.Usage.OutputTokens > 0 {
 				rec.OutputTokens = ev.Usage.OutputTokens
+			}
+			if ev.Usage.CacheReadInputTokens > 0 {
+				rec.CacheRead = ev.Usage.CacheReadInputTokens
 			}
 			if ev.Usage.ServerToolUse.WebSearchRequests > 0 {
 				rec.WebSearchCount = ev.Usage.ServerToolUse.WebSearchRequests

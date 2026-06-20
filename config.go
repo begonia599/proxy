@@ -10,8 +10,9 @@ import (
 	"sync"
 )
 
-// Config 持有运行时配置。upstream key（realKey）允许在运行时通过 /admin/config 更新，
-// 因此用 mutex 守护；admin token 不允许热更新（避免管理员把自己锁死），保持普通字段即可。
+// Config 持有运行时配置。realKey 只在启动迁移期用（种进 anthropic-official 服务商），
+// 运行时上游 key 由「服务商」页管理，不再经 .env 热更新；但仍用 mutex 守护以防残留调用。
+// admin token 不允许热更新（避免管理员把自己锁死），保持普通字段即可。
 type Config struct {
 	mu         sync.RWMutex
 	realKey    string
@@ -70,10 +71,9 @@ func loadConfig() *Config {
 		log.Printf("chmod %s 0600 failed: %v (continuing, but file may be world-readable)", path, err)
 	}
 
-	// realKey 允许启动时为空：管理员可以先空跑再从 /admin/config 写入。
-	// 但要明显警告，避免误以为代理工作正常。
+	// realKey 允许启动时为空：管理员可先空跑，再到「服务商」页配置上游。
 	if cfg.realKey == "" {
-		log.Printf("WARNING: upstream key not set in .env — forward requests will be rejected until set via /admin/config")
+		log.Printf("WARNING: upstream key not set in .env — forward requests will be rejected until an upstream is configured in /admin/providers")
 	}
 	return cfg
 }
@@ -146,7 +146,7 @@ func rewriteEnvKey(path, name, value string) error {
 	return nil
 }
 
-// MaskKey 把 upstream key 渲染成只露后缀的脱敏字符串，给 /admin/config 返回。
+// MaskKey 把 upstream key 渲染成只露后缀的脱敏字符串，给服务商列表的 masked_key 用。
 // 短 key 直接全打码（也不会泄漏长度信号）。
 func MaskKey(k string) string {
 	if k == "" {

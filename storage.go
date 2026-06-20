@@ -64,11 +64,58 @@ CREATE TABLE IF NOT EXISTS error_bodies (
     request_body    BLOB,
     response_body   BLOB
 );
+
+-- 上游服务商：每个 = base_url + key + 协议格式。
+-- 取代原本单一硬编码的 Anthropic 上游，支持多家保底。
+CREATE TABLE IF NOT EXISTS providers (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT UNIQUE NOT NULL,                -- anthropic-official / openrouter / ...
+    base_url    TEXT NOT NULL,                       -- https://api.anthropic.com 等（不含尾斜杠）
+    api_key     TEXT NOT NULL,
+    format      TEXT NOT NULL DEFAULT 'anthropic',   -- anthropic | openai
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL
+);
+
+-- 大组（全局模型池）：每个服务商发现的模型，自动维护的库存清单。
+CREATE TABLE IF NOT EXISTS provider_models (
+    provider_id   INTEGER NOT NULL,
+    upstream_id   TEXT NOT NULL,                     -- 上游真实模型名
+    first_seen_at INTEGER NOT NULL,
+    last_seen_at  INTEGER NOT NULL,
+    PRIMARY KEY (provider_id, upstream_id)
+);
+
+-- 小组：用户手动建，从大组里勾选模型并映射逻辑名。proxy key 绑定一个小组。
+CREATE TABLE IF NOT EXISTS groups (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT UNIQUE NOT NULL,
+    notes       TEXT NOT NULL DEFAULT '',
+    created_at  INTEGER NOT NULL
+);
+
+-- 小组内的逻辑名映射。一对多：同一 (group_id, logical_name) 可有多行，
+-- priority 排序、is_primary 标当前主用那条（不自动故障转移，手动切主用）。
+CREATE TABLE IF NOT EXISTS group_mappings (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id      INTEGER NOT NULL,
+    logical_name  TEXT NOT NULL,                     -- 对外逻辑名
+    provider_id   INTEGER NOT NULL,
+    upstream_id   TEXT NOT NULL,                     -- 该映射指向的上游真实名
+    priority      INTEGER NOT NULL DEFAULT 0,
+    is_primary    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_gm_group ON group_mappings(group_id, logical_name);
 `
 
 // 历史 db 升级用：列已存在时 ALTER 会报错，忽略即可
 var migrations = []string{
 	"ALTER TABLE requests ADD COLUMN web_search_count INTEGER NOT NULL DEFAULT 0",
+	// 多服务商：proxy key 绑定的小组（NULL = 旧行为，回落 allowed_models）
+	"ALTER TABLE proxy_keys ADD COLUMN group_id INTEGER",
+	// 多服务商：请求归因到具体上游 + 上游真实模型名（model 列仍存下游请求名）
+	"ALTER TABLE requests ADD COLUMN provider TEXT",
+	"ALTER TABLE requests ADD COLUMN upstream_model TEXT",
 }
 
 type Store struct {
@@ -111,12 +158,13 @@ func (s *Store) Insert(r *UsageRecord) (int64, error) {
 INSERT INTO requests (
   ts, proxy_key, request_id, http_request_id, endpoint, method, status,
   model, input_tokens, output_tokens, cache_create_5m, cache_create_1h,
-  cache_read, web_search_count, cost_usd, latency_ms, streaming, stop_reason, client_ip, user_agent
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+  cache_read, web_search_count, cost_usd, latency_ms, streaming, stop_reason, client_ip, user_agent,
+  provider, upstream_model
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		r.Time.UnixMilli(), r.ProxyKey, r.RequestID, r.HTTPReqID, r.Endpoint, r.Method, r.Status,
 		r.Model, r.InputTokens, r.OutputTokens, r.CacheCreate5m, r.CacheCreate1h,
 		r.CacheRead, r.WebSearchCount, r.CostUSD, r.LatencyMs, boolToInt(r.Streaming), r.StopReason,
-		r.ClientIP, r.UserAgent,
+		r.ClientIP, r.UserAgent, r.Provider, r.UpstreamModel,
 	)
 	if err != nil {
 		log.Printf("insert request: %v", err)
@@ -446,6 +494,8 @@ type LogRow struct {
 	Method         string    `json:"method"`
 	Status         int       `json:"status"`
 	Model          string    `json:"model"`
+	Provider       string    `json:"provider,omitempty"`
+	UpstreamModel  string    `json:"upstream_model,omitempty"`
 	InputTokens    int       `json:"input_tokens"`
 	OutputTokens   int       `json:"output_tokens"`
 	CacheCreate5m  int       `json:"cache_create_5m"`
@@ -477,7 +527,8 @@ const logCols = `
 id, ts, proxy_key, request_id, http_request_id, endpoint, method, status,
 COALESCE(model, ''), input_tokens, output_tokens, cache_create_5m, cache_create_1h,
 cache_read, web_search_count, cost_usd, latency_ms, streaming,
-COALESCE(stop_reason, ''), COALESCE(client_ip, ''), COALESCE(user_agent, '')
+COALESCE(stop_reason, ''), COALESCE(client_ip, ''), COALESCE(user_agent, ''),
+COALESCE(provider, ''), COALESCE(upstream_model, '')
 `
 
 func (s *Store) scanLogRow(rows *sql.Rows) (*LogRow, error) {
@@ -489,7 +540,7 @@ func (s *Store) scanLogRow(rows *sql.Rows) (*LogRow, error) {
 		&r.Endpoint, &r.Method, &r.Status, &r.Model,
 		&r.InputTokens, &r.OutputTokens, &r.CacheCreate5m, &r.CacheCreate1h,
 		&r.CacheRead, &r.WebSearchCount, &r.CostUSD, &r.LatencyMs, &streaming,
-		&r.StopReason, &r.ClientIP, &r.UserAgent); err != nil {
+		&r.StopReason, &r.ClientIP, &r.UserAgent, &r.Provider, &r.UpstreamModel); err != nil {
 		return nil, err
 	}
 	r.Time = time.UnixMilli(ts)
@@ -599,7 +650,7 @@ func (s *Store) GetLogDetail(id int64) (*LogDetail, error) {
 		&d.Endpoint, &d.Method, &d.Status, &d.Model,
 		&d.InputTokens, &d.OutputTokens, &d.CacheCreate5m, &d.CacheCreate1h,
 		&d.CacheRead, &d.WebSearchCount, &d.CostUSD, &d.LatencyMs, &streaming,
-		&d.StopReason, &d.ClientIP, &d.UserAgent); err != nil {
+		&d.StopReason, &d.ClientIP, &d.UserAgent, &d.Provider, &d.UpstreamModel); err != nil {
 		return nil, err
 	}
 	d.Time = time.UnixMilli(ts)

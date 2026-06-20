@@ -43,11 +43,8 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 			writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "only POST is allowed")
 			return
 		}
-		if cfg.GetRealKey() == "" {
-			writeOpenAIError(w, http.StatusServiceUnavailable, "api_error",
-				"upstream API key not configured on proxy")
-			return
-		}
+		// 上游 key 不再由 cfg 持有，而是按路由命中的服务商决定；
+		// "无上游可用" 的判断下沉到 ResolveRoute（返回 503 config error）。
 
 		startTime := time.Now()
 
@@ -95,106 +92,87 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 			return
 		}
 
-		// ── 模型校验 ──
+		// ── 模型校验 + 路由解析 ──
 		if oaiReq.Model == "" {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "model is required")
 			return
 		}
-		// ResolveAlias：接受短名（如 claude-haiku-4-5）并解析到 registry 里的完整 ID，
-		// 用完整 ID 查白名单，避免 key 白名单写完整 ID 时短名被误拒。
-		// 转发时仍透传客户端原始模型名，让 Anthropic 做最终解析（保 prompt cache）。
-		canonical, ok := modelRegistry.ResolveAlias(oaiReq.Model)
-		if !ok {
-			writeOpenAIError(w, http.StatusNotFound, "not_found_error",
-				"model not available via this proxy: "+oaiReq.Model)
+		rt, rerr := ResolveRoute(keyMeta, oaiReq.Model)
+		if rerr != nil {
+			status, _, stop := classifyRouteError(rerr)
+			// OpenAI 错误类型名与 Anthropic 略不同，单独映射
+			errType := "server_error"
+			switch status {
+			case http.StatusNotFound:
+				errType = "not_found_error"
+			case http.StatusForbidden:
+				errType = "permission_error"
+			}
+			writeOpenAIError(w, status, errType, rerr.Error())
 			go writeRecord(&UsageRecord{
 				Time: startTime, ProxyKey: proxyKey, Endpoint: "/v1/chat/completions",
-				Method: "POST", Status: 404, Model: oaiReq.Model, ClientIP: cip, UserAgent: ua,
-				LatencyMs: time.Since(startTime).Milliseconds(), StopReason: "proxy_rejected",
-			}, raw, nil)
-			return
-		}
-		if !keyMeta.ModelAllowed(canonical) {
-			writeOpenAIError(w, http.StatusForbidden, "permission_error",
-				"this proxy key is not permitted to use model: "+oaiReq.Model)
-			go writeRecord(&UsageRecord{
-				Time: startTime, ProxyKey: proxyKey, Endpoint: "/v1/chat/completions",
-				Method: "POST", Status: 403, Model: oaiReq.Model, ClientIP: cip, UserAgent: ua,
-				LatencyMs: time.Since(startTime).Milliseconds(), StopReason: "proxy_rejected_allowlist",
+				Method: "POST", Status: status, Model: oaiReq.Model, ClientIP: cip, UserAgent: ua,
+				LatencyMs: time.Since(startTime).Milliseconds(), StopReason: stop,
 			}, raw, nil)
 			return
 		}
 
-		// ── 转换请求 ──
+		// ── 转换请求为规范态 Anthropic ──
 		antReq, err := convertRequest(&oaiReq)
 		if err != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 			return
 		}
-
-		// ── 调上游 ──
+		antReq.Model = rt.UpstreamID // 用上游真实模型名
 		antBody, _ := json.Marshal(antReq)
-		upResp, err := callAnthropic(cfg, antBody)
-		if err != nil {
-			log.Printf("compat: upstream error: %v", err)
+
+		// ── 调上游（统一返回 Anthropic 规范态，无论 provider 格式）──
+		res := callUpstreamAnthropic(rt, antBody, oaiReq.Stream)
+		if res.Err != nil {
+			log.Printf("compat: upstream error: %v", res.Err)
 			writeOpenAIError(w, http.StatusBadGateway, "server_error", "upstream request failed")
+			go writeRecord(&UsageRecord{
+				Time: startTime, ProxyKey: proxyKey, Endpoint: "/v1/chat/completions",
+				Method: "POST", Status: http.StatusBadGateway, Model: oaiReq.Model,
+				Provider: rt.Provider.Name, UpstreamModel: rt.UpstreamID, ClientIP: cip, UserAgent: ua,
+				LatencyMs: time.Since(startTime).Milliseconds(), StopReason: "proxy_upstream_error",
+			}, raw, nil)
 			return
 		}
-		defer upResp.Body.Close()
 
 		// 构造基础 UsageRecord
 		rec := &UsageRecord{
-			Time:      startTime,
-			ProxyKey:  proxyKey,
-			HTTPReqID: upResp.Header.Get("request-id"),
-			Endpoint:  "/v1/chat/completions",
-			Method:    "POST",
-			Status:    upResp.StatusCode,
-			Model:     oaiReq.Model,
-			ClientIP:  cip,
-			UserAgent: ua,
-			Streaming: oaiReq.Stream,
+			Time:          startTime,
+			ProxyKey:      proxyKey,
+			Endpoint:      "/v1/chat/completions",
+			Method:        "POST",
+			Status:        res.Status,
+			Model:         oaiReq.Model,
+			Provider:      rt.Provider.Name,
+			UpstreamModel: rt.UpstreamID,
+			ClientIP:      cip,
+			UserAgent:     ua,
+			Streaming:     oaiReq.Stream,
 		}
 
-		if oaiReq.Stream && upResp.StatusCode == 200 {
-			relayStream(w, r, upResp, rec, raw)
+		if oaiReq.Stream && res.Stream != nil {
+			relayStream(w, r, res, rec, raw)
 		} else {
-			relayNonStream(w, upResp, rec, raw)
+			relayNonStream(w, res, rec, raw)
 		}
 	}
 }
 
-// ── 上游 HTTP 调用 ──
+// ── 非流式响应处理（输入已是 Anthropic 规范态）──
 
-func callAnthropic(cfg *Config, body []byte) (*http.Response, error) {
-	req, err := http.NewRequest("POST", upstreamURL+"/v1/messages", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("x-api-key", cfg.GetRealKey())
-	req.Header.Set("anthropic-version", "2023-06-01")
-	if cfg.HideCC {
-		req.Header.Set("user-agent", "claude-proxy/0.2")
-	}
-	return compatClient.Do(req)
-}
-
-// ── 非流式响应处理 ──
-
-func relayNonStream(w http.ResponseWriter, upResp *http.Response, rec *UsageRecord, reqBody []byte) {
-	respBody, err := io.ReadAll(io.LimitReader(upResp.Body, 50<<20))
-	if err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "server_error", "failed to read upstream response")
-		return
-	}
-
+func relayNonStream(w http.ResponseWriter, res *upstreamResult, rec *UsageRecord, reqBody []byte) {
+	respBody := res.AnthBody
 	rec.LatencyMs = time.Since(rec.Time).Milliseconds()
 
 	// 非 2xx → 转换错误格式后透传状态码
-	if upResp.StatusCode < 200 || upResp.StatusCode >= 300 {
+	if res.Status < 200 || res.Status >= 300 {
 		w.Header().Set("content-type", "application/json")
-		w.WriteHeader(upResp.StatusCode)
+		w.WriteHeader(res.Status)
 		_, _ = w.Write(convertAnthropicError(respBody))
 		parseUsageJSON(respBody, rec)
 		go writeRecord(rec, reqBody, respBody)
@@ -218,14 +196,15 @@ func relayNonStream(w http.ResponseWriter, upResp *http.Response, rec *UsageReco
 	go writeRecord(rec, reqBody, respBody)
 }
 
-// ── 流式 SSE 中继 ──
+// ── 流式 SSE 中继（输入是 Anthropic 规范态 SSE 流）──
 
-func relayStream(w http.ResponseWriter, r *http.Request, upResp *http.Response, rec *UsageRecord, reqBody []byte) {
+func relayStream(w http.ResponseWriter, r *http.Request, res *upstreamResult, rec *UsageRecord, reqBody []byte) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeOpenAIError(w, http.StatusInternalServerError, "server_error", "streaming not supported")
 		return
 	}
+	defer res.Stream.Close()
 
 	w.Header().Set("content-type", "text/event-stream")
 	w.Header().Set("cache-control", "no-cache")
@@ -236,7 +215,7 @@ func relayStream(w http.ResponseWriter, r *http.Request, upResp *http.Response, 
 	var teeBuf bytes.Buffer
 	const maxTee = 4 << 20
 
-	scanner := bufio.NewScanner(upResp.Body)
+	scanner := bufio.NewScanner(res.Stream)
 	scanner.Buffer(make([]byte, 1<<20), 8<<20)
 
 	var eventType string
@@ -314,12 +293,17 @@ func openaiModelsHandler() http.HandlerFunc {
 			return
 		}
 
-		allowed := func(id string) bool { return keyMeta.ModelAllowed(id) }
-		ids := modelRegistry.FilteredModelIDs(allowed)
-
-		// registry 未加载（fail-open）→ 直接问上游，再按 key 白名单过滤后转 OpenAI 格式
-		if ids == nil {
-			ids = fetchUpstreamModelIDs(allowed)
+		// 绑定小组 → 列逻辑名
+		var ids []string
+		if keyMeta.GroupID != nil {
+			ids = providerRegistry.LogicalNames(*keyMeta.GroupID)
+		} else {
+			allowed := func(id string) bool { return keyMeta.ModelAllowed(id) }
+			ids = modelRegistry.FilteredModelIDs(allowed)
+			// registry 未加载（fail-open）→ 直接问上游，再按 key 白名单过滤后转 OpenAI 格式
+			if ids == nil {
+				ids = fetchUpstreamModelIDs(allowed)
+			}
 		}
 
 		now := time.Now().Unix()

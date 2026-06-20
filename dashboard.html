@@ -602,9 +602,10 @@
     <nav class="tabs fade-up" style="animation-delay: 60ms">
       <a href="#/overview" data-route="overview"><span class="cn">总览</span>OVERVIEW</a>
       <a href="#/keys" data-route="keys"><span class="cn">密钥</span>KEYS</a>
+      <a href="#/providers" data-route="providers"><span class="cn">服务商</span>PROVIDERS</a>
+      <a href="#/groups" data-route="groups"><span class="cn">分组</span>GROUPS</a>
       <a href="#/models" data-route="models"><span class="cn">模型</span>MODELS</a>
       <a href="#/logs" data-route="logs"><span class="cn">日志</span>LOGS</a>
-      <a href="#/config" data-route="config"><span class="cn">设置</span>CONFIG</a>
     </nav>
 
     <!-- ============ OVERVIEW ============ -->
@@ -702,6 +703,51 @@
       <table id="keys-table"></table>
     </section>
 
+    <!-- ============ PROVIDERS ============ -->
+    <section id="view-providers" class="view">
+      <div class="section-head" style="margin-top: 8px">
+        <h2>上游服务商</h2>
+        <span class="h-serif">保底来源</span>
+        <span class="rule"></span>
+        <div class="right">
+          <button class="btn" id="prov-create">新建服务商</button>
+        </div>
+      </div>
+      <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
+        每个服务商 = base_url + key + 协议格式。新建后自动拉取其模型列表（大组库存）。在「分组」里把这些模型映射成对外逻辑名。
+      </p>
+      <table id="providers-table"></table>
+    </section>
+
+    <!-- ============ GROUPS ============ -->
+    <section id="view-groups" class="view">
+      <div class="section-head" style="margin-top: 8px">
+        <h2>分组</h2>
+        <span class="h-serif">逻辑名映射</span>
+        <span class="rule"></span>
+        <div class="right">
+          <button class="btn" id="grp-create">新建分组</button>
+        </div>
+      </div>
+      <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
+        从大组库存里挑模型，给每个起一个对外逻辑名（如 sonnet / opus）。同一逻辑名可挂多个上游，手动切「主用」即可零感知换上游。proxy key 绑定一个分组作为可用模型白名单。
+      </p>
+      <div style="display:grid;grid-template-columns:240px 1fr;gap:24px;align-items:start">
+        <div>
+          <div class="section-head" style="margin-top:0"><h2 style="font-size:14px">分组列表</h2></div>
+          <div id="groups-list"></div>
+        </div>
+        <div>
+          <div class="section-head" style="margin-top:0">
+            <h2 style="font-size:14px" id="grp-detail-title">选择一个分组</h2>
+            <span class="rule"></span>
+            <div class="right"><button class="btn ghost" id="grp-add-mapping" style="display:none">添加映射</button></div>
+          </div>
+          <table id="mappings-table"></table>
+        </div>
+      </div>
+    </section>
+
     <!-- ============ MODELS ============ -->
     <section id="view-models" class="view">
       <div class="section-head" style="margin-top: 8px">
@@ -750,35 +796,8 @@
       </div>
     </section>
 
-    <!-- ============ CONFIG ============ -->
-    <section id="view-config" class="view">
-      <div class="section-head" style="margin-top: 8px">
-        <h2>上游密钥</h2>
-        <span class="h-serif">Anthropic key</span>
-        <span class="rule"></span>
-      </div>
-      <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
-        发往 api.anthropic.com 的 <code>x-api-key</code>。保存即写入服务器 .env (mode 0600)。出于安全，只能看到最后 4 位。
-      </p>
-
-      <div style="max-width: 640px; padding: 24px; border: 1px solid var(--rule); border-radius: 2px; background: var(--bg-soft)">
-        <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:20px">
-          <span style="font-size:10px;letter-spacing:0.08em;color:var(--fg-dim)">当前</span>
-          <span id="cfg-masked" style="font-family:ui-monospace,Menlo,monospace;font-size:14px;color:var(--fg)">—</span>
-          <span id="cfg-length" style="font-size:11px;color:var(--fg-sub);margin-left:auto"></span>
-        </div>
-
-        <div class="field" style="margin-bottom:16px">
-          <label>新 key（替换当前值）</label>
-          <input id="cfg-new-key" type="password" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false">
-        </div>
-        <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center">
-          <span id="cfg-status" style="font-size:11px;color:var(--fg-dim);margin-right:auto"></span>
-          <button class="btn danger" id="cfg-clear" title="清除后代理将拒绝转发请求，直到再次设置">清除</button>
-          <button class="btn" id="cfg-save">保存新 key</button>
-        </div>
-      </div>
-    </section>
+    <!-- ============ CONFIG: 已移除 ============ -->
+    <!-- 上游 key 不再单独管理；Anthropic 只是「服务商」之一，统一在服务商页配置。 -->
 
     <footer>
       <span>本机 · 127.0.0.1:8787</span>
@@ -804,13 +823,75 @@
       </div>
       <div class="grid full">
         <div class="field">
-          <label>允许模型 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">不勾选任何则允许全部</span></label>
+          <label>绑定分组 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">绑定后用分组的逻辑名作白名单，下方「允许模型」忽略</span></label>
+          <select id="mk-group"><option value="">— 不绑定（用允许模型）—</option></select>
+        </div>
+      </div>
+      <div class="grid full">
+        <div class="field">
+          <label>允许模型 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">不勾选任何则允许全部；绑定分组时此项无效</span></label>
           <div class="model-check-grid" id="mk-models"></div>
         </div>
       </div>
       <div class="actions">
         <button class="btn ghost" id="mk-cancel">取消</button>
         <button class="btn" id="mk-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- provider create / edit modal -->
+  <div class="modal-bg" id="modal-prov-bg">
+    <div class="modal">
+      <h3 id="modal-prov-title">新建服务商</h3>
+      <div class="grid">
+        <div class="field"><label>名称</label><input id="mp-name" type="text" placeholder="例如：anthropic-official / openrouter"></div>
+        <div class="field"><label>协议格式</label>
+          <select id="mp-format">
+            <option value="anthropic">anthropic（原生 /v1/messages）</option>
+            <option value="openai">openai（/v1/chat/completions）</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid full">
+        <div class="field"><label>Base URL</label><input id="mp-baseurl" type="text" placeholder="https://api.anthropic.com"></div>
+      </div>
+      <div class="grid full">
+        <div class="field"><label id="mp-key-label">API Key</label><input id="mp-apikey" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false"></div>
+      </div>
+      <div class="grid full">
+        <div class="field" style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" id="mp-enabled" checked style="accent-color:var(--hero)"><label style="margin:0">启用</label>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="mp-cancel">取消</button>
+        <button class="btn" id="mp-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- mapping create modal -->
+  <div class="modal-bg" id="modal-map-bg">
+    <div class="modal">
+      <h3>添加映射</h3>
+      <div class="grid full">
+        <div class="field"><label>对外逻辑名 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">下游请求时用的名字，如 sonnet</span></label><input id="mm-logical" type="text" placeholder="sonnet"></div>
+      </div>
+      <div class="grid full">
+        <div class="field"><label>上游服务商</label><select id="mm-provider"></select></div>
+      </div>
+      <div class="grid full">
+        <div class="field"><label>上游真实模型 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">从该服务商库存里选</span></label><select id="mm-upstream"></select></div>
+      </div>
+      <div class="grid full">
+        <div class="field" style="flex-direction:row;align-items:center;gap:8px">
+          <input type="checkbox" id="mm-primary" checked style="accent-color:var(--hero)"><label style="margin:0">设为该逻辑名的主用</label>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="mm-cancel">取消</button>
+        <button class="btn" id="mm-save">保存</button>
       </div>
     </div>
   </div>
@@ -919,9 +1000,10 @@
     function loadRoute(route) {
       if (route === 'overview') { fetchStats(); fetchTimeseries(); }
       else if (route === 'keys') { fetchKeys(); }
+      else if (route === 'providers') { fetchProviders(); }
+      else if (route === 'groups') { fetchGroups(); }
       else if (route === 'models') { fetchModels(); }
       else if (route === 'logs') { logsCursor = 0; logsRows = []; fetchLogs(); fillLogsFilterSelects(); }
-      else if (route === 'config') { fetchConfig(); }
     }
     function reloadCurrent() { loadRoute(currentRoute()); }
 
@@ -1221,6 +1303,7 @@
     // KEYS
     // =================================================
     let modelOptionsCache = []; // for create modal
+    let groupsCache = []; // 分组列表缓存，给 key 绑定下拉用
 
     $('#show-revoked').addEventListener('change', fetchKeys);
     $('#key-create').addEventListener('click', () => openKeyModal(null));
@@ -1234,6 +1317,8 @@
         if (!modelOptionsCache.length) {
           try { modelOptionsCache = await adminFetch('/admin/models'); } catch (e) {}
         }
+        // 分组列表（给绑定下拉）——每次刷新，分组可能有增删
+        try { groupsCache = await adminFetch('/admin/groups') || []; } catch (e) {}
       } catch (e) {
         $('#keys-table').innerHTML = '<tbody><tr><td class="empty" colspan="7">' + escHTML(e.message) + '</td></tr></tbody>';
       }
@@ -1306,6 +1391,12 @@
       $('#mk-budget').value = km && km.daily_budget ? km.daily_budget : '';
       $('#mk-notes').value = km ? (km.notes || '') : '';
 
+      // group dropdown
+      const gsel = $('#mk-group');
+      gsel.innerHTML = '<option value="">— 不绑定（用允许模型）—</option>' +
+        groupsCache.map(g => '<option value="' + g.id + '">' + escHTML(g.name) + '</option>').join('');
+      gsel.value = (km && km.group_id) ? String(km.group_id) : '';
+
       // model checkboxes
       let allowed = null;
       if (km && km.allowed_models && km.allowed_models !== '*') {
@@ -1328,6 +1419,7 @@
     $('#mk-save').addEventListener('click', async () => {
       const checked = Array.from($('#mk-models').querySelectorAll('input:checked')).map(i => i.value);
       const allowed_models = checked.length === 0 ? '*' : JSON.stringify(checked);
+      const groupVal = $('#mk-group').value;
       const body = {
         owner: $('#mk-owner').value.trim(),
         daily_budget: parseFloat($('#mk-budget').value) || 0,
@@ -1336,13 +1428,15 @@
       };
       try {
         if (modalKeyEditing) {
-          // PATCH (don't send owner if unchanged — but simpler to send all)
           const patchBody = {
             owner: body.owner,
             daily_budget: body.daily_budget,
             allowed_models: body.allowed_models,
             notes: body.notes,
           };
+          // 分组：选了 → group_id；空 → clear_group 解绑
+          if (groupVal) patchBody.group_id = parseInt(groupVal, 10);
+          else patchBody.clear_group = true;
           await adminFetch('/admin/keys/' + encodeURIComponent(modalKeyEditing.key), {
             method: 'PATCH',
             body: patchBody,
@@ -1351,6 +1445,7 @@
           fetchKeys();
         } else {
           if (!body.owner) { alert('持有者不能为空'); return; }
+          if (groupVal) body.group_id = parseInt(groupVal, 10);
           const created = await adminFetch('/admin/keys', { method: 'POST', body });
           $('#modal-key-reveal-text').textContent = created.key;
           $('#modal-key-reveal').style.display = 'block';
@@ -1410,6 +1505,274 @@
         });
       });
     }
+
+    // =================================================
+    // PROVIDERS
+    // =================================================
+    let providersCache = [];
+
+    $('#prov-create').addEventListener('click', () => openProvModal(null));
+
+    async function fetchProviders() {
+      try {
+        providersCache = await adminFetch('/admin/providers') || [];
+        renderProviders(providersCache);
+      } catch (e) {
+        $('#providers-table').innerHTML = '<tbody><tr><td class="empty" colspan="6">' + escHTML(e.message) + '</td></tr></tbody>';
+      }
+    }
+
+    function renderProviders(rows) {
+      const t = $('#providers-table');
+      if (rows.length === 0) {
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="6">尚无服务商。点击右上「新建服务商」开始。</td></tr></tbody>';
+        return;
+      }
+      let html = '<thead><tr><th>名称</th><th>格式</th><th>Base URL</th><th>Key</th><th>状态</th><th class="actions">操作</th></tr></thead><tbody>';
+      for (const p of rows) {
+        html += '<tr data-id="' + p.id + '">';
+        html += '<td class="k">' + escHTML(p.name) + '</td>';
+        html += '<td class="dim">' + escHTML(p.format) + '</td>';
+        html += '<td class="dim mono" style="font-size:11px">' + escHTML(p.base_url) + '</td>';
+        html += '<td class="dim mono" style="font-size:11px">' + escHTML(p.masked_key || '—') + '</td>';
+        html += '<td>' + (p.enabled ? '<span class="status-pill ok">启用</span>' : '<span class="status-pill revoked">停用</span>') + '</td>';
+        html += '<td class="actions">';
+        html += '<button class="btn ghost" data-act="refresh" style="padding:4px 10px;font-size:10px;margin-right:6px">刷新模型</button>';
+        html += '<button class="btn ghost" data-act="edit" style="padding:4px 10px;font-size:10px;margin-right:6px">编辑</button>';
+        html += '<button class="btn ghost" data-act="del" style="padding:4px 10px;font-size:10px;color:var(--error)">删除</button>';
+        html += '</td></tr>';
+      }
+      html += '</tbody>';
+      t.innerHTML = html;
+
+      t.querySelectorAll('tr[data-id]').forEach(tr => {
+        const id = parseInt(tr.dataset.id, 10);
+        const p = rows.find(x => x.id === id);
+        tr.querySelectorAll('button[data-act]').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const act = btn.dataset.act;
+            if (act === 'del') {
+              if (!confirm('删除服务商 ' + p.name + '？将连带清除其库存模型与引用它的映射。')) return;
+              try { await adminFetch('/admin/providers/' + id, { method: 'DELETE' }); fetchProviders(); }
+              catch (e) { alert('删除失败：' + e.message); }
+            } else if (act === 'edit') {
+              openProvModal(p);
+            } else if (act === 'refresh') {
+              btn.textContent = '刷新中…'; btn.disabled = true;
+              try {
+                const r = await adminFetch('/admin/providers/' + id + '/refresh', { method: 'POST' });
+                alert('已发现 ' + (r.count || 0) + ' 个模型');
+              } catch (e) { alert('刷新失败：' + e.message); }
+              finally { btn.textContent = '刷新模型'; btn.disabled = false; }
+            }
+          });
+        });
+      });
+    }
+
+    // ---------- provider modal ----------
+    let modalProvEditing = null;
+    function openProvModal(p) {
+      modalProvEditing = p;
+      $('#modal-prov-title').textContent = p ? '编辑服务商' : '新建服务商';
+      $('#mp-name').value = p ? p.name : '';
+      $('#mp-format').value = p ? p.format : 'anthropic';
+      $('#mp-baseurl').value = p ? p.base_url : '';
+      $('#mp-apikey').value = '';
+      $('#mp-apikey').placeholder = p ? '留空 = 不修改（当前 ' + (p.masked_key || '无') + '）' : 'sk-...';
+      $('#mp-enabled').checked = p ? p.enabled : true;
+      $('#modal-prov-bg').classList.add('active');
+    }
+    $('#mp-cancel').addEventListener('click', () => $('#modal-prov-bg').classList.remove('active'));
+    $('#modal-prov-bg').addEventListener('click', (e) => {
+      if (e.target === $('#modal-prov-bg')) $('#modal-prov-bg').classList.remove('active');
+    });
+    $('#mp-save').addEventListener('click', async () => {
+      const name = $('#mp-name').value.trim();
+      const base_url = $('#mp-baseurl').value.trim();
+      const api_key = $('#mp-apikey').value;
+      const format = $('#mp-format').value;
+      const enabled = $('#mp-enabled').checked;
+      if (!name || !base_url) { alert('名称和 Base URL 必填'); return; }
+      try {
+        if (modalProvEditing) {
+          const body = { name, base_url, format, enabled };
+          if (api_key) body.api_key = api_key; // 空 = 不改
+          await adminFetch('/admin/providers/' + modalProvEditing.id, { method: 'PATCH', body });
+        } else {
+          if (!api_key) { alert('新建时必须填 API Key'); return; }
+          await adminFetch('/admin/providers', { method: 'POST', body: { name, base_url, api_key, format, enabled } });
+        }
+        $('#modal-prov-bg').classList.remove('active');
+        fetchProviders();
+      } catch (e) { alert('保存失败：' + e.message); }
+    });
+
+    // =================================================
+    // GROUPS
+    // =================================================
+    let selectedGroupId = null;
+
+    $('#grp-create').addEventListener('click', async () => {
+      const name = prompt('新分组名称：');
+      if (!name || !name.trim()) return;
+      try {
+        await adminFetch('/admin/groups', { method: 'POST', body: { name: name.trim() } });
+        fetchGroups();
+      } catch (e) { alert('新建失败：' + e.message); }
+    });
+
+    async function fetchGroups() {
+      try {
+        groupsCache = await adminFetch('/admin/groups') || [];
+        // 同时刷新 providers（添加映射时要选服务商 + 库存）
+        if (!providersCache.length) {
+          try { providersCache = await adminFetch('/admin/providers') || []; } catch (e) {}
+        }
+        renderGroupsList(groupsCache);
+        if (selectedGroupId && groupsCache.some(g => g.id === selectedGroupId)) {
+          renderMappings(selectedGroupId);
+        } else {
+          selectedGroupId = null;
+          $('#grp-detail-title').textContent = '选择一个分组';
+          $('#grp-add-mapping').style.display = 'none';
+          $('#mappings-table').innerHTML = '';
+        }
+      } catch (e) {
+        $('#groups-list').innerHTML = '<div class="empty">' + escHTML(e.message) + '</div>';
+      }
+    }
+
+    function renderGroupsList(rows) {
+      const el = $('#groups-list');
+      if (rows.length === 0) {
+        el.innerHTML = '<div class="dim" style="font-size:12px;color:var(--fg-sub)">尚无分组</div>';
+        return;
+      }
+      el.innerHTML = rows.map(g => {
+        const active = g.id === selectedGroupId ? ' style="border-color:var(--hero);color:var(--fg)"' : '';
+        return '<div class="grp-item" data-id="' + g.id + '"' + active +
+          ' style="padding:10px 12px;border:1px solid var(--rule);border-radius:2px;margin-bottom:8px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">' +
+          '<span>' + escHTML(g.name) + '</span>' +
+          '<button class="btn ghost" data-act="del-grp" style="padding:2px 8px;font-size:10px;color:var(--error)">删</button>' +
+          '</div>';
+      }).join('');
+      el.querySelectorAll('.grp-item').forEach(item => {
+        const id = parseInt(item.dataset.id, 10);
+        item.addEventListener('click', (e) => {
+          if (e.target.dataset.act === 'del-grp') {
+            e.stopPropagation();
+            if (!confirm('删除分组？引用它的密钥将回落到「允许模型」。')) return;
+            adminFetch('/admin/groups/' + id, { method: 'DELETE' }).then(fetchGroups).catch(e => alert('删除失败：' + e.message));
+            return;
+          }
+          selectedGroupId = id;
+          renderGroupsList(groupsCache);
+          renderMappings(id);
+        });
+      });
+    }
+
+    async function renderMappings(groupId) {
+      const g = groupsCache.find(x => x.id === groupId);
+      $('#grp-detail-title').textContent = g ? ('分组：' + g.name) : '分组';
+      $('#grp-add-mapping').style.display = '';
+      let list = [];
+      try { list = await adminFetch('/admin/groups/' + groupId + '/mappings') || []; }
+      catch (e) { $('#mappings-table').innerHTML = '<tbody><tr><td class="empty" colspan="5">' + escHTML(e.message) + '</td></tr></tbody>'; return; }
+
+      const t = $('#mappings-table');
+      if (list.length === 0) {
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="5">尚无映射。点「添加映射」把库存模型映射成逻辑名。</td></tr></tbody>';
+        return;
+      }
+      const provName = (pid) => { const p = providersCache.find(x => x.id === pid); return p ? p.name : ('#' + pid); };
+      let html = '<thead><tr><th>逻辑名</th><th>上游服务商</th><th>真实模型</th><th>主用</th><th class="actions">操作</th></tr></thead><tbody>';
+      for (const m of list) {
+        html += '<tr data-id="' + m.id + '">';
+        html += '<td class="k">' + escHTML(m.logical_name) + '</td>';
+        html += '<td class="dim">' + escHTML(provName(m.provider_id)) + '</td>';
+        html += '<td class="dim mono" style="font-size:11px">' + escHTML(m.upstream_id) + '</td>';
+        html += '<td>' + (m.is_primary
+          ? '<span class="status-pill ok">主用</span>'
+          : '<button class="btn ghost" data-act="primary" style="padding:2px 8px;font-size:10px">设主用</button>') + '</td>';
+        html += '<td class="actions"><button class="btn ghost" data-act="del-map" style="padding:4px 10px;font-size:10px;color:var(--error)">删除</button></td>';
+        html += '</tr>';
+      }
+      html += '</tbody>';
+      t.innerHTML = html;
+
+      t.querySelectorAll('tr[data-id]').forEach(tr => {
+        const mid = parseInt(tr.dataset.id, 10);
+        tr.querySelectorAll('button[data-act]').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (btn.dataset.act === 'primary') {
+              try { await adminFetch('/admin/groups/' + groupId + '/mappings/' + mid + '/primary', { method: 'POST' }); renderMappings(groupId); }
+              catch (e) { alert('设置失败：' + e.message); }
+            } else if (btn.dataset.act === 'del-map') {
+              if (!confirm('删除此映射？')) return;
+              try { await adminFetch('/admin/groups/' + groupId + '/mappings/' + mid, { method: 'DELETE' }); renderMappings(groupId); }
+              catch (e) { alert('删除失败：' + e.message); }
+            }
+          });
+        });
+      });
+    }
+
+    // ---------- mapping modal ----------
+    $('#grp-add-mapping').addEventListener('click', () => openMappingModal());
+
+    async function openMappingModal() {
+      if (!selectedGroupId) return;
+      $('#mm-logical').value = '';
+      $('#mm-primary').checked = true;
+      // 服务商下拉
+      const psel = $('#mm-provider');
+      psel.innerHTML = providersCache.filter(p => p.enabled)
+        .map(p => '<option value="' + p.id + '">' + escHTML(p.name) + ' (' + p.format + ')</option>').join('');
+      await fillUpstreamOptions();
+      $('#modal-map-bg').classList.add('active');
+    }
+    $('#mm-provider').addEventListener('change', fillUpstreamOptions);
+
+    async function fillUpstreamOptions() {
+      const pid = parseInt($('#mm-provider').value, 10);
+      const usel = $('#mm-upstream');
+      usel.innerHTML = '<option value="">加载中…</option>';
+      if (!pid) { usel.innerHTML = ''; return; }
+      try {
+        const models = await adminFetch('/admin/providers/' + pid + '/models') || [];
+        if (models.length === 0) {
+          usel.innerHTML = '<option value="">（该服务商暂无库存，请先在服务商页「刷新模型」）</option>';
+          return;
+        }
+        usel.innerHTML = models.map(m => '<option value="' + escHTML(m.upstream_id) + '">' + escHTML(m.upstream_id) + '</option>').join('');
+      } catch (e) {
+        usel.innerHTML = '<option value="">加载失败</option>';
+      }
+    }
+
+    $('#mm-cancel').addEventListener('click', () => $('#modal-map-bg').classList.remove('active'));
+    $('#modal-map-bg').addEventListener('click', (e) => {
+      if (e.target === $('#modal-map-bg')) $('#modal-map-bg').classList.remove('active');
+    });
+    $('#mm-save').addEventListener('click', async () => {
+      const logical_name = $('#mm-logical').value.trim();
+      const provider_id = parseInt($('#mm-provider').value, 10);
+      const upstream_id = $('#mm-upstream').value;
+      const is_primary = $('#mm-primary').checked;
+      if (!logical_name || !provider_id || !upstream_id) { alert('逻辑名、服务商、真实模型都必填'); return; }
+      try {
+        await adminFetch('/admin/groups/' + selectedGroupId + '/mappings', {
+          method: 'POST',
+          body: { logical_name, provider_id, upstream_id, is_primary },
+        });
+        $('#modal-map-bg').classList.remove('active');
+        renderMappings(selectedGroupId);
+      } catch (e) { alert('保存失败：' + e.message); }
+    });
 
     // =================================================
     // LOGS
@@ -1510,6 +1873,7 @@
           ['状态', '<span class="status-pill ' + (ok ? 'ok' : 'err') + '">' + d.status + '</span>'
             + (d.stop_reason ? ' <span class="dim" style="margin-left:8px">' + escHTML(d.stop_reason) + '</span>' : '')],
           ['模型', d.model || '—'],
+          ['上游服务商', escHTML(d.provider || '—') + (d.upstream_model ? ' <span class="dim" style="margin-left:8px">→ ' + escHTML(d.upstream_model) + '</span>' : '')],
           ['输入 / 输出', fmtInt(d.input_tokens) + ' / ' + fmtInt(d.output_tokens)],
           ['缓存读', fmtInt(d.cache_read)],
           ['缓存写 (5m / 1h)', fmtInt(d.cache_create_5m) + ' / ' + fmtInt(d.cache_create_1h)],
@@ -1546,58 +1910,8 @@
     });
 
     // =================================================
-    // CONFIG (upstream key)
+    // CONFIG 已移除：上游 key 统一在「服务商」页管理
     // =================================================
-    async function fetchConfig() {
-      if (!tokenInput.value.trim()) {
-        $('#cfg-masked').textContent = '请输入管理员令牌';
-        $('#cfg-length').textContent = '';
-        return;
-      }
-      try {
-        const data = await adminFetch('/admin/config');
-        if (data.has_key) {
-          $('#cfg-masked').textContent = data.masked;
-          $('#cfg-length').textContent = data.length + ' 字符';
-        } else {
-          $('#cfg-masked').textContent = '（未设置）';
-          $('#cfg-length').textContent = '';
-        }
-        $('#cfg-status').textContent = '';
-      } catch (e) {
-        $('#cfg-masked').textContent = '加载失败';
-        $('#cfg-status').textContent = e.message;
-      }
-    }
-
-    $('#cfg-save').addEventListener('click', async () => {
-      const v = $('#cfg-new-key').value.trim();
-      if (!v) { $('#cfg-status').textContent = '请先填写新 key'; return; }
-      if (!v.startsWith('sk-ant-')) {
-        if (!confirm('该 key 不以 sk-ant- 开头，确认提交吗？')) return;
-      }
-      $('#cfg-status').textContent = '保存中…';
-      try {
-        await adminFetch('/admin/config', { method: 'PUT', body: { upstream_key: v } });
-        $('#cfg-new-key').value = '';
-        $('#cfg-status').textContent = '已更新';
-        fetchConfig();
-      } catch (e) {
-        $('#cfg-status').textContent = '失败：' + e.message;
-      }
-    });
-
-    $('#cfg-clear').addEventListener('click', async () => {
-      if (!confirm('清除上游 key 后，代理将拒绝所有转发请求。确认清除？')) return;
-      $('#cfg-status').textContent = '清除中…';
-      try {
-        await adminFetch('/admin/config', { method: 'DELETE' });
-        $('#cfg-status').textContent = '已清除';
-        fetchConfig();
-      } catch (e) {
-        $('#cfg-status').textContent = '失败：' + e.message;
-      }
-    });
 
     // ---------- bootstrap ----------
     if (!location.hash) location.hash = '#/overview';

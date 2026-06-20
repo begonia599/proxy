@@ -27,6 +27,7 @@ type KeyMeta struct {
 	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
 	DailyBudget   float64    `json:"daily_budget"` // USD; 0 = unlimited
 	AllowedModels string     `json:"allowed_models"`
+	GroupID       *int64     `json:"group_id,omitempty"` // 绑定的小组；nil = 回落 allowed_models（旧行为）
 	Notes         string     `json:"notes"`
 }
 
@@ -57,7 +58,7 @@ func (k *KeyMeta) ModelAllowed(modelID string) bool {
 // ---------- DB 操作 ----------
 
 func (s *Store) ListKeys(includeRevoked bool) ([]KeyMeta, error) {
-	q := "SELECT key, owner, created_at, revoked_at, daily_budget, allowed_models, notes FROM proxy_keys"
+	q := "SELECT key, owner, created_at, revoked_at, daily_budget, allowed_models, group_id, notes FROM proxy_keys"
 	if !includeRevoked {
 		q += " WHERE revoked_at IS NULL"
 	}
@@ -72,14 +73,19 @@ func (s *Store) ListKeys(includeRevoked bool) ([]KeyMeta, error) {
 		var k KeyMeta
 		var createdMs int64
 		var revokedMs sql.NullInt64
+		var groupID sql.NullInt64
 		if err := rows.Scan(&k.Key, &k.Owner, &createdMs, &revokedMs,
-			&k.DailyBudget, &k.AllowedModels, &k.Notes); err != nil {
+			&k.DailyBudget, &k.AllowedModels, &groupID, &k.Notes); err != nil {
 			return nil, err
 		}
 		k.CreatedAt = time.UnixMilli(createdMs)
 		if revokedMs.Valid {
 			t := time.UnixMilli(revokedMs.Int64)
 			k.RevokedAt = &t
+		}
+		if groupID.Valid {
+			g := groupID.Int64
+			k.GroupID = &g
 		}
 		out = append(out, k)
 	}
@@ -88,19 +94,24 @@ func (s *Store) ListKeys(includeRevoked bool) ([]KeyMeta, error) {
 
 func (s *Store) GetKey(key string) (*KeyMeta, error) {
 	row := s.db.QueryRow(
-		"SELECT key, owner, created_at, revoked_at, daily_budget, allowed_models, notes FROM proxy_keys WHERE key = ?",
+		"SELECT key, owner, created_at, revoked_at, daily_budget, allowed_models, group_id, notes FROM proxy_keys WHERE key = ?",
 		key)
 	var k KeyMeta
 	var createdMs int64
 	var revokedMs sql.NullInt64
+	var groupID sql.NullInt64
 	if err := row.Scan(&k.Key, &k.Owner, &createdMs, &revokedMs,
-		&k.DailyBudget, &k.AllowedModels, &k.Notes); err != nil {
+		&k.DailyBudget, &k.AllowedModels, &groupID, &k.Notes); err != nil {
 		return nil, err
 	}
 	k.CreatedAt = time.UnixMilli(createdMs)
 	if revokedMs.Valid {
 		t := time.UnixMilli(revokedMs.Int64)
 		k.RevokedAt = &t
+	}
+	if groupID.Valid {
+		g := groupID.Int64
+		k.GroupID = &g
 	}
 	return &k, nil
 }
@@ -113,8 +124,8 @@ func (s *Store) CreateKey(k *KeyMeta) error {
 		k.CreatedAt = time.Now()
 	}
 	_, err := s.db.Exec(
-		"INSERT INTO proxy_keys (key, owner, created_at, daily_budget, allowed_models, notes) VALUES (?, ?, ?, ?, ?, ?)",
-		k.Key, k.Owner, k.CreatedAt.UnixMilli(), k.DailyBudget, k.AllowedModels, k.Notes)
+		"INSERT INTO proxy_keys (key, owner, created_at, daily_budget, allowed_models, group_id, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		k.Key, k.Owner, k.CreatedAt.UnixMilli(), k.DailyBudget, k.AllowedModels, k.GroupID, k.Notes)
 	return err
 }
 
@@ -123,6 +134,8 @@ type KeyUpdate struct {
 	Owner         *string  `json:"owner,omitempty"`
 	DailyBudget   *float64 `json:"daily_budget,omitempty"`
 	AllowedModels *string  `json:"allowed_models,omitempty"`
+	GroupID       *int64   `json:"group_id,omitempty"` // 见 ClearGroup：传 -1 表示解绑（置 NULL）
+	ClearGroup    bool     `json:"clear_group,omitempty"`
 	Notes         *string  `json:"notes,omitempty"`
 }
 
@@ -140,6 +153,12 @@ func (s *Store) UpdateKey(key string, u KeyUpdate) error {
 	if u.AllowedModels != nil {
 		sets = append(sets, "allowed_models = ?")
 		args = append(args, *u.AllowedModels)
+	}
+	if u.ClearGroup {
+		sets = append(sets, "group_id = NULL")
+	} else if u.GroupID != nil {
+		sets = append(sets, "group_id = ?")
+		args = append(args, *u.GroupID)
 	}
 	if u.Notes != nil {
 		sets = append(sets, "notes = ?")

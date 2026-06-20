@@ -1,0 +1,404 @@
+// admin_providers.go: /admin/providers、/admin/groups 的 JSON CRUD。
+//
+// 风格与 admin.go 的 adminKeysHandler 一致：Bearer admin token 鉴权，
+// 路径尾段当 id，写操作后 providerRegistry.Reload() 让路由热路径感知。
+// api_key 对外用 MaskKey 脱敏，永不回传明文。
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strings"
+)
+
+func adminAuthOK(cfg *Config, r *http.Request) bool {
+	return r.Header.Get("authorization") == "Bearer "+cfg.AdminToken
+}
+
+// providerView 是 Provider 的对外视图：脱敏 key + has_key 标记。
+type providerView struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	BaseURL   string `json:"base_url"`
+	Format    string `json:"format"`
+	Enabled   bool   `json:"enabled"`
+	HasKey    bool   `json:"has_key"`
+	MaskedKey string `json:"masked_key"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+func toProviderView(p *Provider) providerView {
+	return providerView{
+		ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, Format: p.Format,
+		Enabled: p.Enabled, HasKey: p.APIKey != "", MaskedKey: MaskKey(p.APIKey),
+		CreatedAt: p.CreatedAt.UnixMilli(),
+	}
+}
+
+// adminProvidersHandler 处理 /admin/providers 与 /admin/providers/{id}[/...]：
+//
+//	GET    /admin/providers              列出全部（脱敏）
+//	POST   /admin/providers              新建 {name,base_url,api_key,format,enabled}
+//	PATCH  /admin/providers/{id}         部分更新（api_key 空 = 不改）
+//	DELETE /admin/providers/{id}         删除（连带清库存与映射）
+//	POST   /admin/providers/{id}/refresh 立即拉一次该服务商模型库存
+//	GET    /admin/providers/{id}/models  列该服务商已发现的模型（大组库存）
+func adminProvidersHandler(cfg *Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !adminAuthOK(cfg, r) {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+
+		path := strings.TrimPrefix(r.URL.Path, "/admin/providers")
+		path = strings.TrimPrefix(path, "/")
+		// 可能是 "{id}" 或 "{id}/refresh" 或 "{id}/models"
+		var idPart, sub string
+		if path != "" {
+			parts := strings.SplitN(path, "/", 2)
+			idPart = parts[0]
+			if len(parts) == 2 {
+				sub = parts[1]
+			}
+		}
+
+		switch {
+		case r.Method == http.MethodGet && idPart == "":
+			list, err := store.ListProviders()
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			views := make([]providerView, 0, len(list))
+			for i := range list {
+				views = append(views, toProviderView(&list[i]))
+			}
+			_ = json.NewEncoder(w).Encode(views)
+
+		case r.Method == http.MethodPost && idPart == "":
+			var req struct {
+				Name    string `json:"name"`
+				BaseURL string `json:"base_url"`
+				APIKey  string `json:"api_key"`
+				Format  string `json:"format"`
+				Enabled *bool  `json:"enabled"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+				return
+			}
+			if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.BaseURL) == "" {
+				http.Error(w, `{"error":"name and base_url required"}`, http.StatusBadRequest)
+				return
+			}
+			if req.Format == "" {
+				req.Format = "anthropic"
+			}
+			if req.Format != "anthropic" && req.Format != "openai" {
+				http.Error(w, `{"error":"format must be anthropic or openai"}`, http.StatusBadRequest)
+				return
+			}
+			enabled := true
+			if req.Enabled != nil {
+				enabled = *req.Enabled
+			}
+			p := &Provider{Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey, Format: req.Format, Enabled: enabled}
+			id, err := store.CreateProvider(p)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			p.ID = id
+			reloadProviders()
+			// 新建后异步拉一次模型库存
+			go func() {
+				if fresh, err := store.GetProvider(id); err == nil {
+					_ = providerRegistry.Refresh(fresh)
+				}
+			}()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(toProviderView(p))
+
+		case r.Method == http.MethodPatch && idPart != "":
+			id, ok := parseID(w, idPart)
+			if !ok {
+				return
+			}
+			var u ProviderUpdate
+			if err := json.NewDecoder(r.Body).Decode(&u); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+				return
+			}
+			if u.Format != nil && *u.Format != "anthropic" && *u.Format != "openai" {
+				http.Error(w, `{"error":"format must be anthropic or openai"}`, http.StatusBadRequest)
+				return
+			}
+			if err := store.UpdateProvider(id, u); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+				return
+			}
+			reloadProviders()
+			p, _ := store.GetProvider(id)
+			_ = json.NewEncoder(w).Encode(toProviderView(p))
+
+		case r.Method == http.MethodDelete && idPart != "":
+			id, ok := parseID(w, idPart)
+			if !ok {
+				return
+			}
+			if err := store.DeleteProvider(id); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+				return
+			}
+			reloadProviders()
+			_, _ = w.Write([]byte(`{"ok":true}`))
+
+		case r.Method == http.MethodPost && sub == "refresh":
+			id, ok := parseID(w, idPart)
+			if !ok {
+				return
+			}
+			p, err := store.GetProvider(id)
+			if err != nil {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			if err := providerRegistry.Refresh(p); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
+				return
+			}
+			models, _ := store.ListProviderModels(id)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "count": len(models)})
+
+		case r.Method == http.MethodGet && sub == "models":
+			id, ok := parseID(w, idPart)
+			if !ok {
+				return
+			}
+			models, err := store.ListProviderModels(id)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			if models == nil {
+				models = []ProviderModel{}
+			}
+			_ = json.NewEncoder(w).Encode(models)
+
+		default:
+			http.Error(w, `{"error":"method/path not supported"}`, http.StatusBadRequest)
+		}
+	}
+}
+
+// adminGroupsHandler 处理 /admin/groups 与 /admin/groups/{id}[/mappings[/{mid}[/primary]]]：
+//
+//	GET    /admin/groups                       列出全部小组
+//	POST   /admin/groups                       新建 {name,notes}
+//	PATCH  /admin/groups/{id}                  改 name/notes
+//	DELETE /admin/groups/{id}                  删除（连带映射）
+//	GET    /admin/groups/{id}/mappings         列该组映射
+//	POST   /admin/groups/{id}/mappings         新建映射 {logical_name,provider_id,upstream_id,is_primary}
+//	DELETE /admin/groups/{id}/mappings/{mid}   删映射
+//	POST   /admin/groups/{id}/mappings/{mid}/primary  设为主用
+func adminGroupsHandler(cfg *Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !adminAuthOK(cfg, r) {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+
+		path := strings.TrimPrefix(r.URL.Path, "/admin/groups")
+		path = strings.TrimPrefix(path, "/")
+		parts := []string{}
+		if path != "" {
+			parts = strings.Split(path, "/")
+		}
+
+		switch {
+		// /admin/groups
+		case len(parts) == 0:
+			switch r.Method {
+			case http.MethodGet:
+				list, err := store.ListGroups()
+				if err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+					return
+				}
+				if list == nil {
+					list = []Group{}
+				}
+				_ = json.NewEncoder(w).Encode(list)
+			case http.MethodPost:
+				var req struct {
+					Name  string `json:"name"`
+					Notes string `json:"notes"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+					return
+				}
+				if strings.TrimSpace(req.Name) == "" {
+					http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+					return
+				}
+				g := &Group{Name: req.Name, Notes: req.Notes}
+				id, err := store.CreateGroup(g)
+				if err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+					return
+				}
+				g.ID = id
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(g)
+			default:
+				http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			}
+
+		// /admin/groups/{id}
+		case len(parts) == 1:
+			id, ok := parseID(w, parts[0])
+			if !ok {
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				var req struct {
+					Name  *string `json:"name"`
+					Notes *string `json:"notes"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+					return
+				}
+				if err := store.UpdateGroup(id, req.Name, req.Notes); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			case http.MethodDelete:
+				if err := store.DeleteGroup(id); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+					return
+				}
+				reloadProviders()
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			default:
+				http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			}
+
+		// /admin/groups/{id}/mappings
+		case len(parts) == 2 && parts[1] == "mappings":
+			gid, ok := parseID(w, parts[0])
+			if !ok {
+				return
+			}
+			switch r.Method {
+			case http.MethodGet:
+				list, err := store.ListGroupMappings(gid)
+				if err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+					return
+				}
+				if list == nil {
+					list = []GroupMapping{}
+				}
+				_ = json.NewEncoder(w).Encode(list)
+			case http.MethodPost:
+				var req struct {
+					LogicalName string `json:"logical_name"`
+					ProviderID  int64  `json:"provider_id"`
+					UpstreamID  string `json:"upstream_id"`
+					Priority    int    `json:"priority"`
+					IsPrimary   bool   `json:"is_primary"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+					return
+				}
+				if strings.TrimSpace(req.LogicalName) == "" || req.ProviderID == 0 || strings.TrimSpace(req.UpstreamID) == "" {
+					http.Error(w, `{"error":"logical_name, provider_id, upstream_id required"}`, http.StatusBadRequest)
+					return
+				}
+				m := &GroupMapping{
+					GroupID: gid, LogicalName: req.LogicalName, ProviderID: req.ProviderID,
+					UpstreamID: req.UpstreamID, Priority: req.Priority, IsPrimary: req.IsPrimary,
+				}
+				id, err := store.CreateMapping(m)
+				if err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+					return
+				}
+				m.ID = id
+				// 若标了主用，确保同组同名其它行清主用
+				if req.IsPrimary {
+					_ = store.SetPrimaryMapping(id)
+				}
+				reloadProviders()
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(m)
+			default:
+				http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			}
+
+		// /admin/groups/{id}/mappings/{mid}
+		case len(parts) == 3 && parts[1] == "mappings":
+			mid, ok := parseID(w, parts[2])
+			if !ok {
+				return
+			}
+			if r.Method != http.MethodDelete {
+				http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+				return
+			}
+			if err := store.DeleteMapping(mid); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+				return
+			}
+			reloadProviders()
+			_, _ = w.Write([]byte(`{"ok":true}`))
+
+		// /admin/groups/{id}/mappings/{mid}/primary
+		case len(parts) == 4 && parts[1] == "mappings" && parts[3] == "primary":
+			mid, ok := parseID(w, parts[2])
+			if !ok {
+				return
+			}
+			if r.Method != http.MethodPost {
+				http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+				return
+			}
+			if err := store.SetPrimaryMapping(mid); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+				return
+			}
+			reloadProviders()
+			_, _ = w.Write([]byte(`{"ok":true}`))
+
+		default:
+			http.Error(w, `{"error":"path not supported"}`, http.StatusBadRequest)
+		}
+	}
+}
+
+// ── 小工具 ──
+
+func parseID(w http.ResponseWriter, s string) (int64, bool) {
+	var id int64
+	if _, err := fmt.Sscanf(s, "%d", &id); err != nil || id <= 0 {
+		http.Error(w, `{"error":"bad id"}`, http.StatusBadRequest)
+		return 0, false
+	}
+	return id, true
+}
+
+func reloadProviders() {
+	if err := providerRegistry.Reload(); err != nil {
+		log.Printf("provider registry reload: %v", err)
+	}
+}

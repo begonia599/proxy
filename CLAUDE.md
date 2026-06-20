@@ -57,23 +57,45 @@ forwardHandler (proxy.go)
 
 | File | Role |
 |---|---|
-| `main.go` | Entry point, mux wiring, embeds `dashboard.html` via `go:embed` |
-| `config.go` | `.env` parser → `Config{RealKey, AdminToken, HideCC}` |
-| `proxy.go` | Reverse proxy assembly, `forwardHandler`, model list handlers, all pre-flight checks |
-| `keys.go` | `KeyMeta` + `KeyCache` (sync.RWMutex map backed by SQLite), CRUD, key generation (sk-proxy- + 160-bit base32) |
-| `models.go` | `ModelRegistry` — in-memory enabled set, 30-min upstream refresh, `FilteredList` (curated ∩ key allowlist) |
+| `main.go` | Entry point, mux wiring, embeds `dashboard.html` via `go:embed`, legacy-key migration + registry init |
+| `config.go` | `.env` parser → `Config{RealKey, AdminToken, HideCC}` (RealKey now only the legacy default upstream) |
+| `proxy.go` | Reverse proxy assembly, route-aware Director, `forwardHandler`, model list handlers, `rewriteTopLevelModel` (surgical model byte-rewrite) |
+| `keys.go` | `KeyMeta` + `KeyCache` (sync.RWMutex map backed by SQLite), CRUD, key gen; `GroupID` binds a key to a group |
+| `routing.go` | `ResolveRoute(key, model) → RouteTarget` — the multi-provider routing core (logical name → primary mapping → upstream-name fallback → legacy default provider) |
+| `providers.go` | `ProviderRegistry` — in-memory providers + group-mapping indexes (byLogical/byUpstream), 30-min model-inventory refresh |
+| `providers_store.go` | DB types + CRUD for providers / provider_models / groups / group_mappings; `migrateLegacyKeyToProvider` |
+| `dispatch.go` | Outbound dispatch: `callUpstreamAnthropic` always returns Anthropic-canonical (translates for openai-format providers); `dispatchAnthropicToOpenAI` |
+| `models.go` | `ModelRegistry` — fallback for keys with no group (curated ∩ allowlist) |
 | `pricing.go` | Static price table, exact match then family-prefix fallback, `CostOf()` |
-| `storage.go` | SQLite schema (WAL mode), all DB ops: insert, stats, timeseries, cursor-paginated logs |
-| `admin.go` | `/admin/*` JSON API handlers (stats, keys CRUD, model toggle, logs) |
-| `usage.go` | `UsageRecord`, JSON + SSE response parsing, `writeRecord` (cost compute + DB insert) |
+| `storage.go` | SQLite schema (WAL mode), all request/stats/log DB ops |
+| `admin.go` | `/admin/*` JSON API (stats, keys CRUD w/ group_id, model toggle, logs, config) |
+| `admin_providers.go` | `/admin/providers` + `/admin/groups` (+ mappings) CRUD handlers |
+| `usage.go` | `UsageRecord` (now w/ Provider, UpstreamModel), JSON + SSE response parsing, `writeRecord` |
 | `tee.go` | `teeBody` — wraps io.ReadCloser, copies up to 4MB to buffer, fires async callback on EOF |
-| `compat.go` | OpenAI Chat Completions handler — translates `/v1/chat/completions` (non-streaming + SSE), direct `http.Client` to upstream (not ReverseProxy) |
-| `compat_convert.go` | Pure conversion functions: OpenAI ↔ Anthropic request/response/SSE types and mapping |
-| `dashboard.html` | 1500-line single-file SPA (Chinese UI), inline CSS/JS, no build step |
+| `compat.go` | OpenAI Chat Completions inbound handler — routes via `ResolveRoute` + `callUpstreamAnthropic` |
+| `compat_convert.go` | Inbound conversion: OpenAI → Anthropic (request) and Anthropic → OpenAI (response/SSE) |
+| `compat_convert_out.go` | Outbound conversion: Anthropic → OpenAI (request) and OpenAI → Anthropic (response/SSE) |
+| `dashboard.html` | Single-file SPA (Chinese UI): overview/keys/providers/groups/models/logs/config tabs |
+
+### Multi-provider routing
+
+```
+ResolveRoute(keyMeta, requestedModel):
+  key bound to group (GroupID != nil):
+    logical name hit → primary mapping for that name
+    else upstream_id match → concrete-name fallback (existing clients unchanged)
+    else → 404 not_found
+  no group (legacy key):
+    → default provider (anthropic-official), model passed through unchanged
+```
+
+- **Canonical form = Anthropic Messages.** Inbound adapter (compat_convert.go) and outbound adapter (compat_convert_out.go) sandwich a single internal format, so all 4 client×provider combos reuse the same pipeline.
+- **Anthropic→Anthropic fast path** stays byte-level via ReverseProxy; logical→concrete model rename uses `rewriteTopLevelModel` (surgical splice, no re-marshal) to preserve prompt-cache bytes.
+- **No auto-failover.** Routing picks the current primary; upstream errors pass straight through to the downstream client.
 
 ### Database
 
-SQLite with WAL mode. Four tables: `requests` (audit log), `proxy_keys`, `curated_models`, `error_bodies` (blob snapshots for non-2xx). All timestamps are unix milliseconds (INTEGER). No migration framework — schema uses `CREATE TABLE IF NOT EXISTS` plus manual `ALTER TABLE` with duplicate-column error swallowing.
+SQLite with WAL mode. Tables: `requests` (audit log, + `provider`/`upstream_model` cols), `proxy_keys` (+ `group_id`), `curated_models`, `error_bodies`, plus multi-provider: `providers`, `provider_models` (auto-discovered inventory), `groups`, `group_mappings` (logical-name → provider+upstream, one-to-many w/ `is_primary`). All timestamps unix milliseconds. No migration framework — `CREATE TABLE IF NOT EXISTS` + manual `ALTER TABLE` with duplicate-column error swallowing.
 
 ### Error response format
 

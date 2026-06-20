@@ -39,9 +39,10 @@ const (
 
 // 进程级单例：被 admin handler 和 forward handler 共用。
 var (
-	store         *Store
-	keys          *KeyCache
-	modelRegistry *ModelRegistry
+	store            *Store
+	keys             *KeyCache
+	modelRegistry    *ModelRegistry
+	providerRegistry *ProviderRegistry
 )
 
 func main() {
@@ -61,7 +62,18 @@ func main() {
 	}
 	log.Printf("proxy keys loaded: %d active", keys.Size())
 
-	// 拉一次模型列表；失败也不阻止启动，注册表会保持空 → fail-open
+	// 多上游：把旧 .env key 迁移成 anthropic-official 服务商（幂等、网络无关），
+	// 再载入服务商 + 小组映射缓存。
+	migrateLegacyKeyToProvider(store, cfg.GetRealKey())
+	providerRegistry = NewProviderRegistry(store)
+	if err := providerRegistry.Reload(); err != nil {
+		log.Fatalf("load providers: %v", err)
+	}
+	// 启动时刷新一次各服务商模型库存（失败不阻止启动）。
+	go providerRegistry.RefreshAll()
+	providerRegistry.RunPeriodic(30 * time.Minute)
+
+	// 旧模型注册表保留：/v1/models 在 key 未绑小组时回落到它（fail-open）。
 	modelRegistry = NewModelRegistry(store)
 	if err := modelRegistry.ReloadFromDB(); err != nil {
 		log.Printf("model registry initial DB load failed: %v", err)
@@ -85,7 +97,11 @@ func main() {
 	mux.HandleFunc("/admin/logs", adminLogsHandler(cfg))
 	mux.HandleFunc("/admin/logs/", adminLogsHandler(cfg))
 	mux.HandleFunc("/admin/timeseries", adminTimeseriesHandler(cfg))
-	mux.HandleFunc("/admin/config", adminConfigHandler(cfg))
+	// 多上游配置：服务商 / 小组 / 映射（上游 key 统一在此管理，无独立 config 页）
+	mux.HandleFunc("/admin/providers", adminProvidersHandler(cfg))
+	mux.HandleFunc("/admin/providers/", adminProvidersHandler(cfg))
+	mux.HandleFunc("/admin/groups", adminGroupsHandler(cfg))
+	mux.HandleFunc("/admin/groups/", adminGroupsHandler(cfg))
 	mux.HandleFunc("/admin/", func(w http.ResponseWriter, r *http.Request) {
 		// 仪表盘 HTML 本身不含敏感数据，token 在浏览器里输入。
 		w.Header().Set("content-type", "text/html; charset=utf-8")

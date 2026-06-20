@@ -16,16 +16,23 @@ import (
 // ────────────────────── OpenAI 类型 ──────────────────────
 
 type oaiChatRequest struct {
-	Model               string       `json:"model"`
-	Messages            []oaiMessage `json:"messages"`
-	MaxTokens           *int         `json:"max_tokens,omitempty"`
-	MaxCompletionTokens *int         `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64     `json:"temperature,omitempty"`
-	TopP                *float64     `json:"top_p,omitempty"`
-	Stop                any          `json:"stop,omitempty"`
-	Stream              bool         `json:"stream"`
-	Tools               []oaiTool    `json:"tools,omitempty"`
-	ToolChoice          any          `json:"tool_choice,omitempty"`
+	Model               string            `json:"model"`
+	Messages            []oaiMessage      `json:"messages"`
+	MaxTokens           *int              `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int              `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64          `json:"temperature,omitempty"`
+	TopP                *float64          `json:"top_p,omitempty"`
+	Stop                any               `json:"stop,omitempty"`
+	Stream              bool              `json:"stream"`
+	StreamOptions       *oaiStreamOptions `json:"stream_options,omitempty"`
+	Tools               []oaiTool         `json:"tools,omitempty"`
+	ToolChoice          any               `json:"tool_choice,omitempty"`
+}
+
+// oaiStreamOptions.IncludeUsage 让 OpenAI 上游在流式末尾带 usage chunk，
+// 出站到 OpenAI 格式上游时设上，才能拿到 token 计费数据。
+type oaiStreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 type oaiMessage struct {

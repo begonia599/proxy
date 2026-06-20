@@ -120,6 +120,7 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 				Owner         string  `json:"owner"`
 				DailyBudget   float64 `json:"daily_budget"`
 				AllowedModels string  `json:"allowed_models"`
+				GroupID       *int64  `json:"group_id"`
 				Notes         string  `json:"notes"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
@@ -140,6 +141,7 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 				Owner:         req.Owner,
 				DailyBudget:   req.DailyBudget,
 				AllowedModels: req.AllowedModels,
+				GroupID:       req.GroupID,
 				Notes:         req.Notes,
 			}
 			if err := store.CreateKey(km); err != nil {
@@ -327,75 +329,6 @@ func adminLogsHandler(cfg *Config) http.HandlerFunc {
 			"logs":  list,
 			"count": len(list),
 		})
-	}
-}
-
-// adminConfigHandler 处理 /admin/config：上游 Anthropic key 的查看 / 更新 / 清除。
-//
-//	GET    /admin/config          → {has_key: bool, masked: "•••…XXXX", length: N}
-//	PUT    /admin/config          → body {"upstream_key": "sk-ant-..."} 替换 key
-//	DELETE /admin/config          → 清除 key（后续 forward 会返回 503，直到再次设置）
-//
-// 永远不返回完整 key——只露后缀。.env 写盘走 cfg.SetRealKey,会强制 0600。
-func adminConfigHandler(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("authorization") != "Bearer "+cfg.AdminToken {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("content-type", "application/json")
-
-		switch r.Method {
-		case http.MethodGet:
-			k := cfg.GetRealKey()
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"has_key": k != "",
-				"masked":  MaskKey(k),
-				"length":  len(k),
-			})
-
-		case http.MethodPut:
-			var req struct {
-				UpstreamKey string `json:"upstream_key"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-				return
-			}
-			newKey := strings.TrimSpace(req.UpstreamKey)
-			if newKey == "" {
-				http.Error(w, `{"error":"upstream_key required (use DELETE to clear)"}`, http.StatusBadRequest)
-				return
-			}
-			// 防呆：贴错的 key 太常见，简单校验前缀避免管理员误把 admin_token 之类塞进来。
-			if !strings.HasPrefix(newKey, "sk-ant-") {
-				http.Error(w, `{"error":"upstream_key must start with sk-ant-"}`, http.StatusBadRequest)
-				return
-			}
-			if err := cfg.SetRealKey(newKey); err != nil {
-				log.Printf("set real key: %v", err)
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-				return
-			}
-			log.Printf("upstream key updated via /admin/config (suffix=%s)", MaskKey(newKey))
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok":     true,
-				"masked": MaskKey(newKey),
-				"length": len(newKey),
-			})
-
-		case http.MethodDelete:
-			if err := cfg.SetRealKey(""); err != nil {
-				log.Printf("clear real key: %v", err)
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-				return
-			}
-			log.Printf("upstream key cleared via /admin/config")
-			_, _ = w.Write([]byte(`{"ok":true}`))
-
-		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		}
 	}
 }
 

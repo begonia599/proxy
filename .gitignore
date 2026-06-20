@@ -5,6 +5,7 @@
 # Build artifacts
 *.exe
 claude-proxy
+claude-proxy~
 claude-proxy.bin
 claude-proxy.bak-*
 claude-proxy.new
@@ -21,3 +22,10 @@ usage.jsonl
 .vscode/
 .idea/
 *.swp
+
+# Editor backups / scratch
+*~
+server.log
+
+# Claude Code session artifacts
+.claude/
