@@ -62,6 +62,13 @@ func main() {
 	}
 	log.Printf("proxy keys loaded: %d active", keys.Size())
 
+	// 用户系统：清过期 session → 给旧密钥回填 creator(=admin) → 首次启动建 admin 账号
+	if n, err := store.PurgeExpiredSessions(); err == nil && n > 0 {
+		log.Printf("purged %d expired sessions", n)
+	}
+	migrateCreators()
+	bootStrapAdmin()
+
 	// 多上游：把旧 .env key 迁移成 anthropic-official 服务商（幂等、网络无关），
 	// 再载入服务商 + 小组映射缓存。
 	migrateLegacyKeyToProvider(store, cfg.GetRealKey())
@@ -88,6 +95,12 @@ func main() {
 	rp := buildReverseProxy(cfg)
 
 	mux := http.NewServeMux()
+
+	// 用户系统：登录 / 登出 / 当前用户 / 改密（无需鉴权的 login + 需鉴权的其余）
+	mux.HandleFunc("/auth/login", authLoginHandler())
+	mux.HandleFunc("/auth/logout", requireAuth(authLogoutHandler()))
+	mux.HandleFunc("/auth/me", authMeHandler())
+	mux.HandleFunc("/auth/password", requireAuth(authPasswordHandler()))
 
 	mux.HandleFunc("/admin/stats", adminStatsHandler(cfg))
 	mux.HandleFunc("/admin/keys", adminKeysHandler(cfg))
@@ -126,6 +139,6 @@ func main() {
 	mux.HandleFunc("/", forwardHandler(cfg, rp))
 
 	log.Printf("claude-proxy listening on %s, upstream %s", listenAddr, upstreamURL)
-	log.Printf("admin token: %s", cfg.AdminToken)
+	// admin token 已废弃：鉴权改用账号密码登录（见启动时的 admin 引导日志）。
 	log.Fatal(http.ListenAndServe(listenAddr, mux))
 }

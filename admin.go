@@ -27,14 +27,7 @@ func parseTime(s string) (time.Time, error) {
 }
 
 func adminStatsHandler(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("authorization")
-		expected := "Bearer " + cfg.AdminToken
-		if auth != expected {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
-
+	h := func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		f := StatsFilter{
 			ProxyKey: q.Get("proxy_key"),
@@ -68,6 +61,7 @@ func adminStatsHandler(cfg *Config) http.HandlerFunc {
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(result)
 	}
+	return requireAuth(h)
 }
 
 // adminKeysHandler 处理 /admin/keys 与 /admin/keys/{key}：
@@ -78,11 +72,8 @@ func adminStatsHandler(cfg *Config) http.HandlerFunc {
 //   DELETE /admin/keys/{key}        软撤销（revoked_at = now）
 // 每次写操作后必须 keys.Reload() 让请求路径感知到。
 func adminKeysHandler(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("authorization") != "Bearer "+cfg.AdminToken {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
+	h := func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
 		w.Header().Set("content-type", "application/json")
 
 		// 从 path 提取 key（可能为空）
@@ -93,7 +84,8 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 		case http.MethodGet:
 			if path == "" {
 				includeRevoked := r.URL.Query().Get("include_revoked") == "true"
-				list, err := store.ListKeys(includeRevoked)
+				// 按 creator 过滤：登录用户只看自己归属的密钥
+				list, err := store.ListKeys(includeRevoked, user.Username)
 				if err != nil {
 					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 					return
@@ -106,6 +98,11 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 			}
 			k, err := store.GetKey(path)
 			if err != nil {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			// 只看自己的：非自己 creator 的密钥也当不存在
+			if k.Creator != user.Username {
 				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 				return
 			}
@@ -127,9 +124,10 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 				return
 			}
-			if strings.TrimSpace(req.Owner) == "" {
-				http.Error(w, `{"error":"owner required"}`, http.StatusBadRequest)
-				return
+			// owner 是备注，可选；不填就用登录用户名占位
+			owner := strings.TrimSpace(req.Owner)
+			if owner == "" {
+				owner = user.Username
 			}
 			newKey, err := GenerateProxyKey()
 			if err != nil {
@@ -138,7 +136,8 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 			}
 			km := &KeyMeta{
 				Key:           newKey,
-				Owner:         req.Owner,
+				Owner:         owner,
+				Creator:       user.Username, // 归属钉死为创建者，后端填，不接受前端值
 				DailyBudget:   req.DailyBudget,
 				AllowedModels: req.AllowedModels,
 				GroupID:       req.GroupID,
@@ -157,6 +156,16 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 		case http.MethodPatch:
 			if path == "" {
 				http.Error(w, `{"error":"key required in path"}`, http.StatusBadRequest)
+				return
+			}
+			// 先查出密钥，校验 creator 本人才能改
+			existing, err := store.GetKey(path)
+			if err != nil {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			if existing.Creator != user.Username {
+				http.Error(w, `{"error":"forbidden: not the creator of this key"}`, http.StatusForbidden)
 				return
 			}
 			var u KeyUpdate
@@ -179,6 +188,15 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 				http.Error(w, `{"error":"key required in path"}`, http.StatusBadRequest)
 				return
 			}
+			existing, err := store.GetKey(path)
+			if err != nil {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			if existing.Creator != user.Username {
+				http.Error(w, `{"error":"forbidden: not the creator of this key"}`, http.StatusForbidden)
+				return
+			}
 			if err := store.RevokeKey(path); err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
 				return
@@ -192,6 +210,7 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		}
 	}
+	return requireAuth(h)
 }
 
 // adminModelsHandler 处理 /admin/models 与 /admin/models/{id}：
@@ -199,11 +218,7 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 //   PATCH /admin/models/{id}      切换 enabled（body: {"enabled":true|false}）
 // PATCH 后必须 modelRegistry.ReloadFromDB() 让 IsKnown 立即生效。
 func adminModelsHandler(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("authorization") != "Bearer "+cfg.AdminToken {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
+	h := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 
 		path := strings.TrimPrefix(r.URL.Path, "/admin/models")
@@ -254,17 +269,14 @@ func adminModelsHandler(cfg *Config) http.HandlerFunc {
 			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 		}
 	}
+	return requireAuth(h)
 }
 
 // adminLogsHandler 处理 /admin/logs 与 /admin/logs/{id}：
 //   GET /admin/logs?limit=N&before_id=X&proxy_key=...&model=...&status=success|error&since=...&until=...
 //   GET /admin/logs/{id}  返回单条详情（含 error_bodies 里保存的 body 快照）
 func adminLogsHandler(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("authorization") != "Bearer "+cfg.AdminToken {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
+	h := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 			return
@@ -330,17 +342,14 @@ func adminLogsHandler(cfg *Config) http.HandlerFunc {
 			"count": len(list),
 		})
 	}
+	return requireAuth(h)
 }
 
 // adminTimeseriesHandler 处理 /admin/timeseries：
 //   GET /admin/timeseries?granularity=hour|day&since=...&until=...&proxy_key=...&model=...
 // 给前端折线图喂数据（输入/输出/总数/缓存/缓存命中率）。
 func adminTimeseriesHandler(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("authorization") != "Bearer "+cfg.AdminToken {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
+	h := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 			return
@@ -382,4 +391,5 @@ func adminTimeseriesHandler(cfg *Config) http.HandlerFunc {
 			"buckets":     buckets,
 		})
 	}
+	return requireAuth(h)
 }

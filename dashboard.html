@@ -25,6 +25,8 @@
 
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
+  /* 始终预留滚动条沟槽：总览页有竖滚动条、其它页没有，避免切换时整体横向偏移 */
+  html { scrollbar-gutter: stable; }
 
   body {
     background: var(--bg);
@@ -128,6 +130,70 @@
   .auth button:active { transform: translateY(1px); }
   .auth button.auto-on { color: var(--hero); border-color: var(--hero); }
   .auth button.auto-on:hover { color: var(--error); border-color: var(--error); }
+
+  /* -------- login -------- */
+  /* 登录态：整页接管，隐藏 header/nav，卡片垂直居中 */
+  body.login-mode .container { display: none; }
+  body.login-mode #login-overlay { display: flex; }
+
+  #login-overlay {
+    display: none;
+    position: fixed; inset: 0; z-index: 2;
+    align-items: center; justify-content: center;
+    padding: 24px;
+  }
+  .login-wrap { width: 100%; display: flex; align-items: center; justify-content: center; }
+  .login-card {
+    width: 100%; max-width: 380px;
+    background: linear-gradient(180deg, var(--bg-soft), var(--bg));
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 44px 40px 40px;
+    box-shadow: 0 24px 80px -24px rgba(0,0,0,0.7), 0 0 0 1px rgba(232,176,74,0.03);
+  }
+  .login-brand { text-align: center; margin-bottom: 36px; }
+  .login-mark {
+    font-size: 10px; letter-spacing: 0.32em; text-transform: uppercase;
+    color: var(--fg-dim); margin-bottom: 8px;
+  }
+  .login-title {
+    font-family: 'Instrument Serif', 'Noto Serif SC', 'Source Han Serif SC', serif;
+    font-style: italic; font-weight: 500;
+    font-size: 64px; line-height: 0.9; color: var(--fg);
+    letter-spacing: 0.02em;
+  }
+  .login-title .accent { color: var(--hero); font-style: normal; font-weight: 400; }
+  .login-tagline {
+    margin-top: 14px; font-size: 11px; letter-spacing: 0.14em;
+    color: var(--fg-sub);
+  }
+  .login-fields { display: flex; flex-direction: column; gap: 18px; }
+  .login-field { display: flex; flex-direction: column; gap: 7px; }
+  .login-field label {
+    font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--fg-dim);
+  }
+  .login-field input {
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 2px;
+    padding: 11px 13px;
+    font: inherit; font-size: 14px; letter-spacing: 0.04em;
+    transition: border-color 140ms, box-shadow 140ms;
+  }
+  .login-field input::placeholder { color: var(--fg-sub); letter-spacing: 0.1em; }
+  .login-field input:focus {
+    outline: none; border-color: var(--hero);
+    box-shadow: 0 0 0 3px rgba(95,180,164,0.1);
+  }
+  .login-err {
+    font-size: 11px; color: var(--error); min-height: 15px;
+    letter-spacing: 0.02em; text-align: center;
+  }
+  .login-btn {
+    width: 100%; padding: 12px; margin-top: 2px;
+    font-size: 13px; letter-spacing: 0.3em;
+    border-radius: 2px;
+  }
 
   /* -------- nav -------- */
   nav.tabs {
@@ -587,14 +653,12 @@
       </div>
       <div class="meta">
         <div class="clock">
-          <span class="dot stale" id="dot"></span>
-          <span id="clock-label">待命</span>
           <span class="time" id="clock">— : — : —</span>
         </div>
         <div class="auth">
-          <input type="password" id="token" placeholder="管理员令牌" autocomplete="off" spellcheck="false">
-          <button id="refresh" title="刷新">↻</button>
-          <button id="auto-refresh" title="自动刷新 10s">⏸</button>
+          <span id="auth-user" class="dim" style="font-size:11px;margin-right:8px;display:none"></span>
+          <button id="change-pw" title="修改密码" style="display:none">改密</button>
+          <button id="logout" title="退出登录" style="display:none">退出</button>
         </div>
       </div>
     </header>
@@ -607,6 +671,8 @@
       <a href="#/models" data-route="models"><span class="cn">模型</span>MODELS</a>
       <a href="#/logs" data-route="logs"><span class="cn">日志</span>LOGS</a>
     </nav>
+
+    <!-- LOGIN 视图已移至 #login-overlay（.container 之外，登录态全屏接管） -->
 
     <!-- ============ OVERVIEW ============ -->
     <section id="view-overview" class="view">
@@ -806,6 +872,31 @@
     </footer>
   </div>
 
+  <!-- ============ LOGIN OVERLAY（登录态全屏接管，.container 之外） ============ -->
+  <div id="login-overlay">
+    <div class="login-wrap">
+      <div class="login-card fade-up">
+        <div class="login-brand">
+          <div class="login-mark">claude-proxy</div>
+          <div class="login-title"><span class="accent">账</span>簿</div>
+          <div class="login-tagline">多上游代理 · 用量账本</div>
+        </div>
+        <div class="login-fields">
+          <div class="login-field">
+            <label>用户名</label>
+            <input id="login-user" type="text" autocomplete="username" spellcheck="false" placeholder="admin">
+          </div>
+          <div class="login-field">
+            <label>密码</label>
+            <input id="login-pw" type="password" autocomplete="current-password" spellcheck="false" placeholder="••••••••">
+          </div>
+          <div id="login-err" class="login-err"></div>
+          <button class="btn login-btn" id="login-submit">登 录</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- key create / edit modal -->
   <div class="modal-bg" id="modal-key-bg">
     <div class="modal">
@@ -815,7 +906,7 @@
         <div class="reveal-note">这是该密钥的完整明文，目前可在数据库中查到，但仍请妥善保存并分发。</div>
       </div>
       <div class="grid">
-        <div class="field"><label>持有者</label><input id="mk-owner" type="text" placeholder="例如：me / alice / cc"></div>
+        <div class="field"><label>备注（给谁用）</label><input id="mk-owner" type="text" placeholder="可选，例如：alice / 自用"></div>
         <div class="field"><label>每日预算 (USD)</label><input id="mk-budget" type="number" min="0" step="0.01" placeholder="0 = 无限制"></div>
       </div>
       <div class="grid full">
@@ -918,31 +1009,123 @@
     const $$ = (s) => Array.from(document.querySelectorAll(s));
 
     // ---------- auth ----------
-    const tokenInput = $('#token');
-    tokenInput.value = localStorage.getItem('claude-proxy-token') || '';
-    tokenInput.addEventListener('change', () => {
-      localStorage.setItem('claude-proxy-token', tokenInput.value);
-      reloadCurrent();
-    });
-    tokenInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') reloadCurrent(); });
+    let currentToken = localStorage.getItem('claude-proxy-token') || '';
+    let currentUser = null;
+
+    // 登录态 ↔ 仪表盘：靠 body.login-mode 切换（CSS 控制 .container / #login-overlay 显隐）
+    function showLogin() {
+      currentToken = '';
+      localStorage.removeItem('claude-proxy-token');
+      currentUser = null;
+      setAuthUI(null);
+      document.body.classList.add('login-mode');
+      $('#login-user').focus();
+    }
+    function showDashboard(user) {
+      setAuthUI(user);
+      document.body.classList.remove('login-mode');
+      if (!location.hash || location.hash === '#/login') location.hash = '#/overview';
+      applyRoute();
+    }
+
+    function setAuthUI(user) {
+      currentUser = user;
+      const authUser = $('#auth-user');
+      const changePw = $('#change-pw');
+      const logoutBtn = $('#logout');
+      if (user) {
+        authUser.textContent = user.username;
+        authUser.style.display = '';
+        changePw.style.display = '';
+        logoutBtn.style.display = '';
+      } else {
+        authUser.style.display = 'none';
+        changePw.style.display = 'none';
+        logoutBtn.style.display = 'none';
+      }
+    }
 
     async function adminFetch(path, opts) {
-      const token = tokenInput.value.trim();
-      if (!token) throw new Error('未填管理员令牌');
+      if (!currentToken) throw new Error('未登录');
       const fullOpts = Object.assign({}, opts || {});
       fullOpts.headers = Object.assign({}, fullOpts.headers || {}, {
-        'Authorization': 'Bearer ' + token,
+        'Authorization': 'Bearer ' + currentToken,
       });
       if (fullOpts.body && typeof fullOpts.body !== 'string') {
         fullOpts.body = JSON.stringify(fullOpts.body);
         fullOpts.headers['Content-Type'] = 'application/json';
       }
       const resp = await fetch(path, fullOpts);
+      if (resp.status === 401) {
+        // session 过期 → 回登录页
+        showLogin();
+        throw new Error('会话已过期，请重新登录');
+      }
       if (!resp.ok) {
         const txt = await resp.text().catch(() => '');
         throw new Error('HTTP ' + resp.status + ' — ' + txt);
       }
       return resp.json();
+    }
+
+    // 登录表单
+    $('#login-submit').addEventListener('click', async () => {
+      const username = $('#login-user').value.trim();
+      const password = $('#login-pw').value;
+      $('#login-err').textContent = '';
+      if (!username || !password) { $('#login-err').textContent = '请填写用户名和密码'; return; }
+      try {
+        const res = await fetch('/auth/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username, password}),
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          $('#login-err').textContent = d.error || '登录失败';
+          return;
+        }
+        const data = await res.json();
+        currentToken = data.token;
+        localStorage.setItem('claude-proxy-token', currentToken);
+        $('#login-pw').value = '';
+        showDashboard(data.user);
+      } catch (e) {
+        $('#login-err').textContent = e.message;
+      }
+    });
+    $('#login-pw').addEventListener('keypress', (e) => { if (e.key === 'Enter') $('#login-submit').click(); });
+    $('#login-user').addEventListener('keypress', (e) => { if (e.key === 'Enter') $('#login-pw').focus(); });
+
+    // 退出
+    $('#logout').addEventListener('click', async () => {
+      try { await fetch('/auth/logout', {method:'POST', headers:{'Authorization':'Bearer '+currentToken}}); } catch (_) {}
+      showLogin();
+    });
+
+    // 改密弹窗（内联 prompt 方式，轻量）
+    $('#change-pw').addEventListener('click', async () => {
+      const oldPw = prompt('当前密码：');
+      if (oldPw == null) return;
+      const newPw = prompt('新密码（至少6位）：');
+      if (newPw == null || newPw.length < 6) { alert('新密码不能少于6位'); return; }
+      try {
+        await adminFetch('/auth/password', {method:'POST', body:{old:oldPw, new:newPw}});
+        alert('密码已更新，下次登录时生效');
+      } catch (e) { alert('修改失败：' + e.message); }
+    });
+
+    // 页面加载：检查登录态
+    async function checkAuth() {
+      if (!currentToken) { showLogin(); return; }
+      try {
+        const res = await fetch('/auth/me', {headers:{'Authorization':'Bearer '+currentToken}});
+        if (!res.ok) throw new Error('unauthorized');
+        const user = await res.json();
+        showDashboard(user);
+      } catch (_) {
+        showLogin();
+      }
     }
 
     // ---------- formatters ----------
@@ -973,10 +1156,8 @@
       return k.slice(0, 16) + '…' + k.slice(-4);
     };
 
-    function setStatus(state, label) {
-      $('#dot').className = 'dot' + (state === 'live' ? '' : state === 'error' ? ' error' : ' stale');
-      $('#clock-label').textContent = label;
-    }
+    // 刷新状态指示已移除：后台静默刷新，此处保留空函数以兼容调用点。
+    function setStatus(state, label) {}
     function tickClock() {
       $('#clock').textContent = new Date().toTimeString().slice(0, 8);
     }
@@ -988,6 +1169,8 @@
       return h.replace(/^#\//, '') || 'overview';
     }
     function applyRoute() {
+      // 登录态下不路由（overlay 接管）
+      if (document.body.classList.contains('login-mode')) return;
       const route = currentRoute();
       $$('.view').forEach(v => v.classList.remove('active'));
       const v = document.querySelector('#view-' + route);
@@ -1007,37 +1190,14 @@
     }
     function reloadCurrent() { loadRoute(currentRoute()); }
 
-    $('#refresh').addEventListener('click', reloadCurrent);
-
-    // ---------- auto-refresh ----------
-    const AUTO_INTERVAL = 10;
-    let autoTimer = null;
-    let autoCountdown = AUTO_INTERVAL;
-    const autoBtn = $('#auto-refresh');
-
-    function startAutoRefresh() {
-      autoCountdown = AUTO_INTERVAL;
-      autoBtn.classList.add('auto-on');
-      autoBtn.textContent = autoCountdown + 's';
-      autoTimer = setInterval(() => {
-        autoCountdown--;
-        if (autoCountdown <= 0) {
-          reloadCurrent();
-          autoCountdown = AUTO_INTERVAL;
-        }
-        autoBtn.textContent = autoCountdown + 's';
-      }, 1000);
-    }
-    function stopAutoRefresh() {
-      clearInterval(autoTimer);
-      autoTimer = null;
-      autoBtn.classList.remove('auto-on');
-      autoBtn.textContent = '⏸';
-    }
-    autoBtn.addEventListener('click', () => {
-      if (autoTimer) stopAutoRefresh(); else startAutoRefresh();
-    });
-    startAutoRefresh();
+    // ---------- 后台静默刷新 ----------
+    // 无按钮、无倒计时：登录后每 10s 静默刷新当前页（登录态除外）。
+    const AUTO_INTERVAL = 10000;
+    setInterval(() => {
+      if (!currentToken) return;
+      if (document.body.classList.contains('login-mode')) return;
+      reloadCurrent();
+    }, AUTO_INTERVAL);
 
     // =================================================
     // OVERVIEW
@@ -1061,7 +1221,7 @@
     }
 
     async function fetchStats() {
-      if (!tokenInput.value.trim()) { renderOverviewEmpty('请输入管理员令牌以解锁'); setStatus('stale','待命'); return; }
+      if (!currentToken) { renderOverviewEmpty('请先登录'); setStatus('stale','待命'); return; }
       setStatus('stale', '拉取中');
       try {
         const t0 = performance.now();
@@ -1185,7 +1345,7 @@
     });
 
     async function fetchTimeseries() {
-      if (!tokenInput.value.trim()) return;
+      if (!currentToken) return;
       try {
         const params = overviewFilterParams();
         params.set('granularity', chartGranularity);
@@ -1327,11 +1487,11 @@
     function renderKeys(rows) {
       const t = $('#keys-table');
       if (rows.length === 0) {
-        t.innerHTML = '<tbody><tr><td class="empty" colspan="7">尚无密钥。点击右上「新建密钥」开始。</td></tr></tbody>';
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="8">尚无密钥。点击右上「新建密钥」开始。</td></tr></tbody>';
         return;
       }
       let html = '<thead><tr>';
-      html += '<th>密钥</th><th>持有者</th><th class="num">日预算</th><th>允许模型</th><th>创建</th><th>状态</th><th class="actions">操作</th>';
+      html += '<th>密钥</th><th>归属</th><th>备注</th><th class="num">日预算</th><th>允许模型</th><th>创建</th><th>状态</th><th class="actions">操作</th>';
       html += '</tr></thead><tbody>';
       for (const k of rows) {
         const revoked = !!k.revoked_at;
@@ -1340,7 +1500,8 @@
         })();
         html += '<tr data-key="' + escHTML(k.key) + '">';
         html += '<td class="k mono" title="' + escHTML(k.key) + '">' + escHTML(truncKey(k.key)) + '</td>';
-        html += '<td class="dim">' + escHTML(k.owner) + '</td>';
+        html += '<td class="dim" title="创建者（不可转让）">' + escHTML(k.creator || '—') + '</td>';
+        html += '<td class="dim">' + escHTML(k.owner || '—') + '</td>';
         html += '<td class="num ' + (k.daily_budget > 0 ? 'cost' : 'zero') + '">' + (k.daily_budget > 0 ? fmtCost(k.daily_budget) : '无限') + '</td>';
         html += '<td class="dim">' + escHTML(allowed) + '</td>';
         html += '<td class="dim">' + escHTML(fmtTime(k.created_at)) + '</td>';
@@ -1444,7 +1605,6 @@
           $('#modal-key-bg').classList.remove('active');
           fetchKeys();
         } else {
-          if (!body.owner) { alert('持有者不能为空'); return; }
           if (groupVal) body.group_id = parseInt(groupVal, 10);
           const created = await adminFetch('/admin/keys', { method: 'POST', body });
           $('#modal-key-reveal-text').textContent = created.key;
@@ -1805,8 +1965,8 @@
     }
 
     async function fetchLogs(more) {
-      if (!tokenInput.value.trim()) {
-        $('#logs-table').innerHTML = '<tbody><tr><td class="empty" colspan="8">请输入管理员令牌</td></tr></tbody>';
+      if (!currentToken) {
+        $('#logs-table').innerHTML = '<tbody><tr><td class="empty" colspan="8">请先登录</td></tr></tbody>';
         return;
       }
       try {
@@ -1914,8 +2074,7 @@
     // =================================================
 
     // ---------- bootstrap ----------
-    if (!location.hash) location.hash = '#/overview';
-    applyRoute();
+    checkAuth();
   })();
   </script>
 </body>

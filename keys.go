@@ -22,7 +22,8 @@ import (
 
 type KeyMeta struct {
 	Key           string     `json:"key"`
-	Owner         string     `json:"owner"`
+	Owner         string     `json:"owner"`        // 备注/标签（如"给谁用"），可改
+	Creator       string     `json:"creator"`      // 归属 = 创建者，钉死不可转让不可改
 	CreatedAt     time.Time  `json:"created_at"`
 	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
 	DailyBudget   float64    `json:"daily_budget"` // USD; 0 = unlimited
@@ -57,53 +58,22 @@ func (k *KeyMeta) ModelAllowed(modelID string) bool {
 
 // ---------- DB 操作 ----------
 
-func (s *Store) ListKeys(includeRevoked bool) ([]KeyMeta, error) {
-	q := "SELECT key, owner, created_at, revoked_at, daily_budget, allowed_models, group_id, notes FROM proxy_keys"
-	if !includeRevoked {
-		q += " WHERE revoked_at IS NULL"
-	}
-	q += " ORDER BY created_at DESC"
-	rows, err := s.db.Query(q)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []KeyMeta
-	for rows.Next() {
-		var k KeyMeta
-		var createdMs int64
-		var revokedMs sql.NullInt64
-		var groupID sql.NullInt64
-		if err := rows.Scan(&k.Key, &k.Owner, &createdMs, &revokedMs,
-			&k.DailyBudget, &k.AllowedModels, &groupID, &k.Notes); err != nil {
-			return nil, err
-		}
-		k.CreatedAt = time.UnixMilli(createdMs)
-		if revokedMs.Valid {
-			t := time.UnixMilli(revokedMs.Int64)
-			k.RevokedAt = &t
-		}
-		if groupID.Valid {
-			g := groupID.Int64
-			k.GroupID = &g
-		}
-		out = append(out, k)
-	}
-	return out, rows.Err()
-}
+const keyCols = "key, owner, creator, created_at, revoked_at, daily_budget, allowed_models, group_id, notes"
 
-func (s *Store) GetKey(key string) (*KeyMeta, error) {
-	row := s.db.QueryRow(
-		"SELECT key, owner, created_at, revoked_at, daily_budget, allowed_models, group_id, notes FROM proxy_keys WHERE key = ?",
-		key)
+// scanKey 扫一行到 KeyMeta（creator 用 COALESCE 兜 NULL，旧数据迁移前可能是空）。
+func scanKey(s interface {
+	Scan(...any) error
+}) (*KeyMeta, error) {
 	var k KeyMeta
 	var createdMs int64
 	var revokedMs sql.NullInt64
 	var groupID sql.NullInt64
-	if err := row.Scan(&k.Key, &k.Owner, &createdMs, &revokedMs,
+	var creator sql.NullString
+	if err := s.Scan(&k.Key, &k.Owner, &creator, &createdMs, &revokedMs,
 		&k.DailyBudget, &k.AllowedModels, &groupID, &k.Notes); err != nil {
 		return nil, err
 	}
+	k.Creator = creator.String
 	k.CreatedAt = time.UnixMilli(createdMs)
 	if revokedMs.Valid {
 		t := time.UnixMilli(revokedMs.Int64)
@@ -116,6 +86,43 @@ func (s *Store) GetKey(key string) (*KeyMeta, error) {
 	return &k, nil
 }
 
+// ListKeys 列密钥。creatorFilter 非空时只返回该 creator 的（用户系统归属过滤）。
+func (s *Store) ListKeys(includeRevoked bool, creatorFilter string) ([]KeyMeta, error) {
+	q := "SELECT " + keyCols + " FROM proxy_keys"
+	args := []any{}
+	conds := []string{}
+	if !includeRevoked {
+		conds = append(conds, "revoked_at IS NULL")
+	}
+	if creatorFilter != "" {
+		conds = append(conds, "creator = ?")
+		args = append(args, creatorFilter)
+	}
+	if len(conds) > 0 {
+		q += " WHERE " + joinAnd(conds)
+	}
+	q += " ORDER BY created_at DESC"
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KeyMeta
+	for rows.Next() {
+		k, err := scanKey(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *k)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetKey(key string) (*KeyMeta, error) {
+	row := s.db.QueryRow("SELECT "+keyCols+" FROM proxy_keys WHERE key = ?", key)
+	return scanKey(row)
+}
+
 func (s *Store) CreateKey(k *KeyMeta) error {
 	if k.AllowedModels == "" {
 		k.AllowedModels = "*"
@@ -124,8 +131,8 @@ func (s *Store) CreateKey(k *KeyMeta) error {
 		k.CreatedAt = time.Now()
 	}
 	_, err := s.db.Exec(
-		"INSERT INTO proxy_keys (key, owner, created_at, daily_budget, allowed_models, group_id, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		k.Key, k.Owner, k.CreatedAt.UnixMilli(), k.DailyBudget, k.AllowedModels, k.GroupID, k.Notes)
+		"INSERT INTO proxy_keys (key, owner, creator, created_at, daily_budget, allowed_models, group_id, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		k.Key, k.Owner, k.Creator, k.CreatedAt.UnixMilli(), k.DailyBudget, k.AllowedModels, k.GroupID, k.Notes)
 	return err
 }
 
@@ -219,9 +226,9 @@ type KeyCache struct {
 
 func NewKeyCache(s *Store) *KeyCache { return &KeyCache{m: map[string]*KeyMeta{}, store: s} }
 
-// Reload 从 DB 重新加载所有未撤销的 key。
+// Reload 从 DB 重新加载所有未撤销的 key（全量，缓存供转发热路径用，与归属过滤无关）。
 func (c *KeyCache) Reload() error {
-	keys, err := c.store.ListKeys(false)
+	keys, err := c.store.ListKeys(false, "")
 	if err != nil {
 		return err
 	}

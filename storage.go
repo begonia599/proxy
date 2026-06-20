@@ -106,6 +106,25 @@ CREATE TABLE IF NOT EXISTS group_mappings (
     is_primary    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_gm_group ON group_mappings(group_id, logical_name);
+
+-- 用户系统：账号密码登录。当前单角色（admin），schema 为将来分发模式预留。
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,                -- bcrypt
+    created_at    INTEGER NOT NULL
+);
+
+-- session：登录后签发的会话令牌。存 SHA-256(token) 而非明文，
+-- 泄漏 DB 也不能直接复用会话。
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash  TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL,
+    expires_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user    ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 `
 
 // 历史 db 升级用：列已存在时 ALTER 会报错，忽略即可
@@ -116,6 +135,8 @@ var migrations = []string{
 	// 多服务商：请求归因到具体上游 + 上游真实模型名（model 列仍存下游请求名）
 	"ALTER TABLE requests ADD COLUMN provider TEXT",
 	"ALTER TABLE requests ADD COLUMN upstream_model TEXT",
+	// 用户系统：密钥归属 = 创建者。NULL = 迁移前建的，启动时回填 admin。
+	"ALTER TABLE proxy_keys ADD COLUMN creator TEXT",
 }
 
 type Store struct {

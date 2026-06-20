@@ -14,10 +14,6 @@ import (
 	"strings"
 )
 
-func adminAuthOK(cfg *Config, r *http.Request) bool {
-	return r.Header.Get("authorization") == "Bearer "+cfg.AdminToken
-}
-
 // providerView 是 Provider 的对外视图：脱敏 key + has_key 标记。
 type providerView struct {
 	ID        int64  `json:"id"`
@@ -47,11 +43,7 @@ func toProviderView(p *Provider) providerView {
 //	POST   /admin/providers/{id}/refresh 立即拉一次该服务商模型库存
 //	GET    /admin/providers/{id}/models  列该服务商已发现的模型（大组库存）
 func adminProvidersHandler(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !adminAuthOK(cfg, r) {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
+	h := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 
 		path := strings.TrimPrefix(r.URL.Path, "/admin/providers")
@@ -193,6 +185,7 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 			http.Error(w, `{"error":"method/path not supported"}`, http.StatusBadRequest)
 		}
 	}
+	return requireAuth(h)
 }
 
 // adminGroupsHandler 处理 /admin/groups 与 /admin/groups/{id}[/mappings[/{mid}[/primary]]]：
@@ -206,11 +199,7 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 //	DELETE /admin/groups/{id}/mappings/{mid}   删映射
 //	POST   /admin/groups/{id}/mappings/{mid}/primary  设为主用
 func adminGroupsHandler(cfg *Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !adminAuthOK(cfg, r) {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
+	h := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 
 		path := strings.TrimPrefix(r.URL.Path, "/admin/groups")
@@ -384,6 +373,7 @@ func adminGroupsHandler(cfg *Config) http.HandlerFunc {
 			http.Error(w, `{"error":"path not supported"}`, http.StatusBadRequest)
 		}
 	}
+	return requireAuth(h)
 }
 
 // ── 小工具 ──
