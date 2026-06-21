@@ -199,7 +199,8 @@ func (s *Store) DeleteProvider(id int64) error {
 
 // ────────────────────── provider_models（大组库存） ──────────────────────
 
-// UpsertProviderModel 刷新时调用：第一次见插入，已见过只更新 last_seen_at。
+// UpsertProviderModel 把一个模型加入大组：第一次见插入，已见过只更新 last_seen_at。
+// 管理员策展（勾选加入 / 全部加入）时调用。
 func (s *Store) UpsertProviderModel(providerID int64, upstreamID string, seenAt time.Time) error {
 	ms := seenAt.UnixMilli()
 	_, err := s.db.Exec(`
@@ -208,6 +209,30 @@ VALUES (?, ?, ?, ?)
 ON CONFLICT(provider_id, upstream_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
 		providerID, upstreamID, ms, ms)
 	return err
+}
+
+// TouchProviderModel 只更新**已在大组**的模型 last_seen（不存在则 0 行受影响，不新增）。
+// 后台心跳用——大组是手动策展的，心跳不擅自添加上游新模型。
+func (s *Store) TouchProviderModel(providerID int64, upstreamID string, seenAt time.Time) error {
+	_, err := s.db.Exec(
+		"UPDATE provider_models SET last_seen_at = ? WHERE provider_id = ? AND upstream_id = ?",
+		seenAt.UnixMilli(), providerID, upstreamID)
+	return err
+}
+
+// DeleteProviderModel 把一个模型移出大组（连带其计价覆盖随行删除）。
+// 注意：引用它的 group_mappings 不在此处理（删模型前应先确认无映射引用，或由管理员清理）。
+func (s *Store) DeleteProviderModel(providerID int64, upstreamID string) error {
+	res, err := s.db.Exec(
+		"DELETE FROM provider_models WHERE provider_id = ? AND upstream_id = ?",
+		providerID, upstreamID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("provider model not found: provider=%d model=%s", providerID, upstreamID)
+	}
+	return nil
 }
 
 const providerModelCols = "provider_id, upstream_id, first_seen_at, last_seen_at, " +

@@ -65,11 +65,13 @@ func adminStatsHandler(cfg *Config) http.HandlerFunc {
 }
 
 // adminKeysHandler 处理 /admin/keys 与 /admin/keys/{key}：
-//   GET    /admin/keys              列出全部（?include_revoked=true 含撤销）
-//   POST   /admin/keys              创建（body: owner/daily_budget/group_id/notes）
-//   GET    /admin/keys/{key}        取单条
-//   PATCH  /admin/keys/{key}        部分更新
-//   DELETE /admin/keys/{key}        软撤销（revoked_at = now）
+//
+//	GET    /admin/keys              列出全部（?include_revoked=true 含撤销）
+//	POST   /admin/keys              创建（body: owner/daily_budget/group_id/notes）
+//	GET    /admin/keys/{key}        取单条
+//	PATCH  /admin/keys/{key}        部分更新
+//	DELETE /admin/keys/{key}        软撤销（revoked_at = now）
+//
 // 每次写操作后必须 keys.Reload() 让请求路径感知到。
 func adminKeysHandler(cfg *Config) http.HandlerFunc {
 	h := func(w http.ResponseWriter, r *http.Request) {
@@ -211,65 +213,10 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 	return requireAuth(h)
 }
 
-// providerModelView 是「模型」页的统一视图：跨服务商的大组库存 + 计价覆盖。
-type providerModelView struct {
-	ProviderID        int64    `json:"provider_id"`
-	Provider          string   `json:"provider"`
-	Format            string   `json:"format"`
-	UpstreamID        string   `json:"upstream_id"`
-	PriceInput        *float64 `json:"price_input"`
-	PriceOutput       *float64 `json:"price_output"`
-	PriceCacheWrite5m *float64 `json:"price_cache_write_5m"`
-	PriceCacheWrite1h *float64 `json:"price_cache_write_1h"`
-	PriceCacheRead    *float64 `json:"price_cache_read"`
-	FirstSeenAt       int64    `json:"first_seen_at"`
-	LastSeenAt        int64    `json:"last_seen_at"`
-}
-
-// adminModelsHandler 处理 GET /admin/models：返回所有服务商的大组库存（含计价覆盖）。
-// 模型层合并后，这里是「模型」页的统一数据源——取代旧 curated_models。
-// 改价走 /admin/providers/{id}/models/{upstream}/price；停用模型 = 从分组里移除映射。
-func adminModelsHandler(cfg *Config) http.HandlerFunc {
-	h := func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("content-type", "application/json")
-
-		provs, err := store.ListProviders()
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		meta := make(map[int64]Provider, len(provs))
-		for _, p := range provs {
-			meta[p.ID] = p
-		}
-		models, err := store.ListAllProviderModels()
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		out := make([]providerModelView, 0, len(models))
-		for _, m := range models {
-			p := meta[m.ProviderID]
-			out = append(out, providerModelView{
-				ProviderID: m.ProviderID, Provider: p.Name, Format: p.Format, UpstreamID: m.UpstreamID,
-				PriceInput: m.PriceInput, PriceOutput: m.PriceOutput,
-				PriceCacheWrite5m: m.PriceCacheWrite5m, PriceCacheWrite1h: m.PriceCacheWrite1h,
-				PriceCacheRead: m.PriceCacheRead,
-				FirstSeenAt:    m.FirstSeenAt.UnixMilli(), LastSeenAt: m.LastSeenAt.UnixMilli(),
-			})
-		}
-		_ = json.NewEncoder(w).Encode(out)
-	}
-	return requireAuth(h)
-}
-
 // adminLogsHandler 处理 /admin/logs 与 /admin/logs/{id}：
-//   GET /admin/logs?limit=N&before_id=X&proxy_key=...&model=...&status=success|error&since=...&until=...
-//   GET /admin/logs/{id}  返回单条详情（含 error_bodies 里保存的 body 快照）
+//
+//	GET /admin/logs?limit=N&before_id=X&proxy_key=...&model=...&status=success|error&since=...&until=...
+//	GET /admin/logs/{id}  返回单条详情（含 error_bodies 里保存的 body 快照）
 func adminLogsHandler(cfg *Config) http.HandlerFunc {
 	h := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -341,7 +288,9 @@ func adminLogsHandler(cfg *Config) http.HandlerFunc {
 }
 
 // adminTimeseriesHandler 处理 /admin/timeseries：
-//   GET /admin/timeseries?granularity=hour|day&since=...&until=...&proxy_key=...&model=...
+//
+//	GET /admin/timeseries?granularity=hour|day&since=...&until=...&proxy_key=...&model=...
+//
 // 给前端折线图喂数据（输入/输出/总数/缓存/缓存命中率）。
 func adminTimeseriesHandler(cfg *Config) http.HandlerFunc {
 	h := func(w http.ResponseWriter, r *http.Request) {

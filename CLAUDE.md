@@ -62,19 +62,19 @@ forwardHandler (proxy.go)
 | `proxy.go` | Reverse proxy assembly, route-aware Director, `forwardHandler`, model list handlers, `rewriteTopLevelModel` (surgical model byte-rewrite) |
 | `keys.go` | `KeyMeta` + `KeyCache` (sync.RWMutex map backed by SQLite), CRUD, key gen; `GroupID` binds a key to a group (its model allowlist); new keys default to the `default` group |
 | `routing.go` | `ResolveRoute(key, model) → RouteTarget` — the routing core. Every key resolves via its **effective group** (`effectiveGroupID`: own group, else default): logical name → primary mapping → upstream-name fallback → group passthrough provider |
-| `providers.go` | `ProviderRegistry` — in-memory providers + group-mapping indexes (byLogical/byUpstream) + passthrough index + per-(provider,model) price index, 30-min model-inventory refresh |
-| `providers_store.go` | DB types + CRUD for providers / provider_models (w/ price cols) / groups (w/ `passthrough_provider_id`) / group_mappings; `migrateLegacyKeyToProvider`, `ensureDefaultGroup` |
+| `providers.go` | `ProviderRegistry` — in-memory providers + group-mapping indexes (byLogical/byUpstream) + passthrough index + per-(provider,model) price index. `UpstreamCatalog` fetches a provider's live model list (no persist, for curation); `RefreshSeen` (30-min) only bumps `last_seen` of already-curated models |
+| `providers_store.go` | DB types + CRUD for providers / provider_models (manually curated, w/ price cols, `Upsert`/`Touch`/`Delete`) / groups (w/ `passthrough_provider_id`) / group_mappings; `migrateLegacyKeyToProvider`, `ensureDefaultGroup` |
 | `dispatch.go` | Outbound dispatch: `callUpstreamAnthropic` always returns Anthropic-canonical (translates for openai-format providers); `dispatchAnthropicToOpenAI` |
 | `pricing.go` | Static price table (`CostOf`/`lookupPrice`) + `Price.Cost`; `tokenCost` resolves per-provider override (`ProviderRegistry.PriceFor`) → static fallback → 0 |
 | `storage.go` | SQLite schema (WAL mode), all request/stats/log DB ops |
-| `admin.go` | `/admin/*` JSON API (stats, keys CRUD w/ group_id, logs; `GET /admin/models` = unified cross-provider inventory + prices) |
-| `admin_providers.go` | `/admin/providers` (+ model price set) + `/admin/groups` (+ mappings, + group passthrough) CRUD handlers |
+| `admin.go` | `/admin/*` JSON API (stats, keys CRUD w/ group_id, logs) |
+| `admin_providers.go` | `/admin/providers` (+ `/catalog` fetch, model add/remove, price set) + `/admin/groups` (+ mappings, + group passthrough) CRUD handlers |
 | `usage.go` | `UsageRecord` (now w/ Provider, UpstreamModel), JSON + SSE response parsing, `writeRecord` |
 | `tee.go` | `teeBody` — wraps io.ReadCloser, copies up to 4MB to buffer, fires async callback on EOF |
 | `compat.go` | OpenAI Chat Completions inbound handler — routes via `ResolveRoute` + `callUpstreamAnthropic` |
 | `compat_convert.go` | Inbound conversion: OpenAI → Anthropic (request) and Anthropic → OpenAI (response/SSE) |
 | `compat_convert_out.go` | Outbound conversion: Anthropic → OpenAI (request) and OpenAI → Anthropic (response/SSE) |
-| `dashboard.html` | Single-file SPA (Chinese UI): overview/keys/providers/groups/models(inventory+pricing)/logs tabs |
+| `dashboard.html` | Single-file SPA (Chinese UI): overview/keys/providers(+per-provider model curation & pricing)/groups/logs tabs |
 
 ### Routing (group-based, single source of truth)
 
@@ -96,7 +96,7 @@ The legacy `ModelRegistry` / `curated_models` / per-key `allowed_models` layer h
 
 ### Database
 
-SQLite with WAL mode. Tables: `requests` (audit log, + `provider`/`upstream_model` cols), `proxy_keys` (+ `group_id`; `allowed_models` retained but unused), `error_bodies`, plus the provider system: `providers`, `provider_models` (auto-discovered inventory + nullable `price_*` override cols), `groups` (+ `passthrough_provider_id`), `group_mappings` (logical-name → provider+upstream, one-to-many w/ `is_primary`). `curated_models` table is retained but no longer read (legacy). All timestamps unix milliseconds. No migration framework — `CREATE TABLE IF NOT EXISTS` + manual `ALTER TABLE` with duplicate-column error swallowing.
+SQLite with WAL mode. Tables: `requests` (audit log, + `provider`/`upstream_model` cols), `proxy_keys` (+ `group_id`; `allowed_models` retained but unused), `error_bodies`, plus the provider system: `providers`, `provider_models` (manually curated inventory — admin fetches the upstream catalog and selects models in; nullable `price_*` override cols), `groups` (+ `passthrough_provider_id`), `group_mappings` (logical-name → provider+upstream, one-to-many w/ `is_primary`). `curated_models` table is retained but no longer read (legacy). All timestamps unix milliseconds. No migration framework — `CREATE TABLE IF NOT EXISTS` + manual `ALTER TABLE` with duplicate-column error swallowing.
 
 ### Error response format
 

@@ -297,13 +297,14 @@ func (r *ProviderRegistry) GroupAnyProvider(groupID int64) (*Provider, bool) {
 	return nil, false
 }
 
-// Refresh 拉取某服务商的模型列表，upsert 进 provider_models（大组库存）。
-// Anthropic 与 OpenAI 的 /v1/models 响应都是 {data:[{id,...}]}，鉴权头不同。
-func (r *ProviderRegistry) Refresh(p *Provider) error {
+// UpstreamCatalog 拉取某服务商上游 /v1/models 的实时模型 id 列表，**不写库**。
+// 给配置页"拉取上游模型 → 勾选加入大组"用。Anthropic 与 OpenAI 的响应都是
+// {data:[{id,...}]}，鉴权头不同。
+func (r *ProviderRegistry) UpstreamCatalog(p *Provider) ([]string, error) {
 	url := p.BaseURL + "/v1/models?limit=100"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	switch p.Format {
 	case "openai":
@@ -315,11 +316,11 @@ func (r *ProviderRegistry) Refresh(p *Provider) error {
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("provider %s models list: status %d", p.Name, resp.StatusCode)
+		return nil, fmt.Errorf("provider %s models list: status %d", p.Name, resp.StatusCode)
 	}
 
 	var body struct {
@@ -328,49 +329,59 @@ func (r *ProviderRegistry) Refresh(p *Provider) error {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(body.Data))
+	for _, m := range body.Data {
+		if m.ID != "" {
+			out = append(out, m.ID)
+		}
+	}
+	return out, nil
+}
+
+// RefreshSeen 后台心跳：拉上游目录，只为**已加入大组**的模型刷新 last_seen
+// （不自动添加新模型——大组由管理员手动策展）。上游已下架的模型 last_seen 会变旧，
+// 配置页据此提示。
+func (r *ProviderRegistry) RefreshSeen(p *Provider) error {
+	ids, err := r.UpstreamCatalog(p)
+	if err != nil {
 		return err
 	}
-
 	now := time.Now()
-	n := 0
-	for _, m := range body.Data {
-		if m.ID == "" {
-			continue
+	for _, id := range ids {
+		// TouchProviderModel 只 UPDATE 已存在行，不存在则 0 行受影响（不新增）。
+		if err := r.store.TouchProviderModel(p.ID, id, now); err != nil {
+			log.Printf("touch provider_model %s/%s: %v", p.Name, id, err)
 		}
-		if err := r.store.UpsertProviderModel(p.ID, m.ID, now); err != nil {
-			log.Printf("upsert provider_model %s/%s: %v", p.Name, m.ID, err)
-			continue
-		}
-		n++
 	}
-	log.Printf("provider %s: discovered %d models", p.Name, n)
 	return nil
 }
 
-// RefreshAll 刷新所有 enabled 服务商的模型库存。
-func (r *ProviderRegistry) RefreshAll() {
+// RefreshSeenAll 给所有 enabled 服务商刷一次已加入模型的 last_seen。
+func (r *ProviderRegistry) RefreshSeenAll() {
 	provs, err := r.store.ListProviders()
 	if err != nil {
-		log.Printf("provider refresh-all: list failed: %v", err)
+		log.Printf("provider refresh-seen-all: list failed: %v", err)
 		return
 	}
 	for i := range provs {
 		if !provs[i].Enabled {
 			continue
 		}
-		if err := r.Refresh(&provs[i]); err != nil {
-			log.Printf("provider refresh %s: %v", provs[i].Name, err)
+		if err := r.RefreshSeen(&provs[i]); err != nil {
+			log.Printf("provider refresh-seen %s: %v", provs[i].Name, err)
 		}
 	}
 }
 
-// RunPeriodic 每 interval 刷新一次全部服务商模型库存。
+// RunPeriodic 每 interval 刷新一次各服务商已加入模型的 last_seen。
 func (r *ProviderRegistry) RunPeriodic(interval time.Duration) {
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for range t.C {
-			r.RefreshAll()
+			r.RefreshSeenAll()
 		}
 	}()
 }

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // providerView 是 Provider 的对外视图：脱敏 key + has_key 标记。
@@ -36,12 +37,15 @@ func toProviderView(p *Provider) providerView {
 
 // adminProvidersHandler 处理 /admin/providers 与 /admin/providers/{id}[/...]：
 //
-//	GET    /admin/providers              列出全部（脱敏）
-//	POST   /admin/providers              新建 {name,base_url,api_key,format,enabled}
-//	PATCH  /admin/providers/{id}         部分更新（api_key 空 = 不改）
-//	DELETE /admin/providers/{id}         删除（连带清库存与映射）
-//	POST   /admin/providers/{id}/refresh 立即拉一次该服务商模型库存
-//	GET    /admin/providers/{id}/models  列该服务商已发现的模型（大组库存）
+//	GET    /admin/providers                       列出全部（脱敏）
+//	POST   /admin/providers                       新建 {name,base_url,api_key,format,enabled}
+//	PATCH  /admin/providers/{id}                  部分更新（api_key 空 = 不改）
+//	DELETE /admin/providers/{id}                  删除（连带清库存/映射/被引透传）
+//	GET    /admin/providers/{id}/catalog          拉上游实时模型列表（不写库，给策展用）
+//	GET    /admin/providers/{id}/models           列已加入大组的模型（含计价）
+//	POST   /admin/providers/{id}/models           批量加入大组 {upstream_ids:[...]}
+//	DELETE /admin/providers/{id}/models/{upstream} 移出大组
+//	POST   /admin/providers/{id}/models/{upstream}/price 设/清计价覆盖
 func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 	h := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
@@ -106,12 +110,7 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 			}
 			p.ID = id
 			reloadProviders()
-			// 新建后异步拉一次模型库存
-			go func() {
-				if fresh, err := store.GetProvider(id); err == nil {
-					_ = providerRegistry.Refresh(fresh)
-				}
-			}()
+			// 不再自动拉取库存——管理员在「管理模型」里手动拉上游目录并勾选加入大组。
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(toProviderView(p))
 
@@ -149,7 +148,7 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 			reloadProviders()
 			_, _ = w.Write([]byte(`{"ok":true}`))
 
-		case r.Method == http.MethodPost && sub == "refresh":
+		case r.Method == http.MethodGet && sub == "catalog":
 			id, ok := parseID(w, idPart)
 			if !ok {
 				return
@@ -159,12 +158,15 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 				return
 			}
-			if err := providerRegistry.Refresh(p); err != nil {
+			ids, err := providerRegistry.UpstreamCatalog(p)
+			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadGateway)
 				return
 			}
-			models, _ := store.ListProviderModels(id)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "count": len(models)})
+			if ids == nil {
+				ids = []string{}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": ids})
 
 		case r.Method == http.MethodGet && sub == "models":
 			id, ok := parseID(w, idPart)
@@ -180,6 +182,35 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 				models = []ProviderModel{}
 			}
 			_ = json.NewEncoder(w).Encode(models)
+
+		// POST /admin/providers/{id}/models —— 批量把选中的上游模型加入大组。
+		case r.Method == http.MethodPost && sub == "models":
+			id, ok := parseID(w, idPart)
+			if !ok {
+				return
+			}
+			var req struct {
+				UpstreamIDs []string `json:"upstream_ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+				return
+			}
+			now := time.Now()
+			added := 0
+			for _, m := range req.UpstreamIDs {
+				m = strings.TrimSpace(m)
+				if m == "" {
+					continue
+				}
+				if err := store.UpsertProviderModel(id, m, now); err != nil {
+					log.Printf("add provider_model %d/%s: %v", id, m, err)
+					continue
+				}
+				added++
+			}
+			reloadProviders()
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "added": added})
 
 		// POST /admin/providers/{id}/models/{upstream}/price —— 设/清按服务商计价覆盖。
 		// upstream 真实名可能含 "/"（如 openrouter 的 anthropic/claude-...），
@@ -223,6 +254,24 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 				}
 			}
 			if err := store.SetProviderModelPrice(id, upstream, price); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+				return
+			}
+			reloadProviders()
+			_, _ = w.Write([]byte(`{"ok":true}`))
+
+		// DELETE /admin/providers/{id}/models/{upstream} —— 把模型移出大组。
+		case r.Method == http.MethodDelete && strings.HasPrefix(sub, "models/"):
+			id, ok := parseID(w, idPart)
+			if !ok {
+				return
+			}
+			upstream := strings.TrimPrefix(sub, "models/")
+			if upstream == "" {
+				http.Error(w, `{"error":"upstream model id required in path"}`, http.StatusBadRequest)
+				return
+			}
+			if err := store.DeleteProviderModel(id, upstream); err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
 				return
 			}

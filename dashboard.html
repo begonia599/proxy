@@ -668,7 +668,6 @@
       <a href="#/keys" data-route="keys"><span class="cn">密钥</span>KEYS</a>
       <a href="#/providers" data-route="providers"><span class="cn">服务商</span>PROVIDERS</a>
       <a href="#/groups" data-route="groups"><span class="cn">分组</span>GROUPS</a>
-      <a href="#/models" data-route="models"><span class="cn">模型</span>MODELS</a>
       <a href="#/logs" data-route="logs"><span class="cn">日志</span>LOGS</a>
     </nav>
 
@@ -780,7 +779,7 @@
         </div>
       </div>
       <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
-        每个服务商 = base_url + key + 协议格式。新建后自动拉取其模型列表（大组库存）。在「分组」里把这些模型映射成对外逻辑名。
+        每个服务商 = base_url + key + 协议格式。新建后点「管理模型」拉取上游模型、勾选加入大组库存并设价。在「分组」里把大组里的模型映射成对外逻辑名。
       </p>
       <table id="providers-table"></table>
     </section>
@@ -817,21 +816,6 @@
           <table id="mappings-table"></table>
         </div>
       </div>
-    </section>
-
-    <!-- ============ MODELS ============ -->
-    <section id="view-models" class="view">
-      <div class="section-head" style="margin-top: 8px">
-        <h2>模型与计价</h2>
-        <span class="h-serif">大组库存</span>
-        <span class="rule"></span>
-        <span class="count" id="models-count">— 行</span>
-      </div>
-      <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
-        各服务商每 30 分钟自动同步一次的模型库存（大组）。在这里给每个模型设按服务商的计价覆盖；
-        未设则回落静态 Anthropic 价表——非 Anthropic 上游若不设价会被记 $0。模型的可用性由「分组」决定（组即白名单）。
-      </p>
-      <table id="models-table"></table>
     </section>
 
     <!-- ============ LOGS ============ -->
@@ -983,6 +967,25 @@
       <div class="actions">
         <button class="btn ghost" id="mm-cancel">取消</button>
         <button class="btn" id="mm-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- provider model-management modal (fetch upstream catalog → curate 大组 + price) -->
+  <div class="modal-bg" id="modal-pm-bg">
+    <div class="modal" style="max-width:760px">
+      <h3>管理模型 <span id="pm-sub" style="color:var(--fg-sub);font-size:11px;margin-left:8px;font-weight:400"></span></h3>
+      <div class="section-head" style="margin-top:4px"><h2 style="font-size:13px">已加入大组</h2><span class="rule"></span></div>
+      <div id="pm-current" style="max-height:220px;overflow:auto;margin-bottom:8px"></div>
+      <div class="section-head" style="margin-top:14px">
+        <h2 style="font-size:13px">上游可用模型</h2>
+        <span class="rule"></span>
+        <div class="right"><button class="btn ghost" id="pm-fetch" style="padding:4px 12px;font-size:11px">拉取上游模型</button></div>
+      </div>
+      <div id="pm-catalog" style="max-height:240px;overflow:auto"></div>
+      <div class="actions">
+        <button class="btn ghost" id="pm-close">关闭</button>
+        <button class="btn" id="pm-add" style="display:none">添加选中</button>
       </div>
     </div>
   </div>
@@ -1211,7 +1214,6 @@
       else if (route === 'keys') { fetchKeys(); }
       else if (route === 'providers') { fetchProviders(); }
       else if (route === 'groups') { fetchGroups(); }
-      else if (route === 'models') { fetchModels(); }
       else if (route === 'logs') { logsCursor = 0; logsRows = []; fetchLogs(); fillLogsFilterSelects(); }
     }
     function reloadCurrent() { loadRoute(currentRoute()); }
@@ -1625,54 +1627,104 @@
     });
 
     // =================================================
-    // MODELS（大组库存 + 按服务商计价）
+    // PROVIDER MODELS（大组库存：手动策展 + 按服务商计价）
     // =================================================
-    let modelsCache = [];
-    async function fetchModels() {
-      try {
-        modelsCache = await adminFetch('/admin/models') || [];
-        renderModels(modelsCache);
-      } catch (e) {
-        $('#models-table').innerHTML = '<tbody><tr><td class="empty" colspan="5">' + escHTML(e.message) + '</td></tr></tbody>';
-      }
-    }
     function fmtPrice(m) {
       if (m.price_input == null && m.price_output == null) return '<span class="dim" style="color:var(--fg-sub)">默认价表</span>';
       const io = (m.price_input != null ? '$' + m.price_input : '$0') + ' / ' + (m.price_output != null ? '$' + m.price_output : '$0');
       return '<span class="mono" style="font-size:11px">' + escHTML(io) + '</span>';
     }
-    function renderModels(rows) {
-      $('#models-count').textContent = rows.length + ' 个';
-      const t = $('#models-table');
-      if (rows.length === 0) {
-        t.innerHTML = '<tbody><tr><td class="empty" colspan="5">尚无库存。去「服务商」页新建服务商或点「刷新模型」。</td></tr></tbody>';
+
+    // ---------- 管理模型 modal（拉上游目录 → 勾选加入大组 / 改价 / 移除）----------
+    let pmProvider = null;        // 当前管理的服务商 {id,name,format}
+    let pmCurrentIds = new Set(); // 已加入大组的 upstream_id
+
+    function openModelMgmt(p) {
+      pmProvider = p;
+      $('#pm-sub').textContent = p.name + ' (' + p.format + ')';
+      $('#pm-catalog').innerHTML = '<div class="dim" style="color:var(--fg-sub);font-size:11px;padding:8px 0">点「拉取上游模型」从该服务商拉取可用列表。</div>';
+      $('#pm-add').style.display = 'none';
+      loadPmCurrent();
+      $('#modal-pm-bg').classList.add('active');
+    }
+    function closePmModal() { $('#modal-pm-bg').classList.remove('active'); pmProvider = null; }
+    $('#pm-close').addEventListener('click', closePmModal);
+    $('#modal-pm-bg').addEventListener('click', (e) => { if (e.target === $('#modal-pm-bg')) closePmModal(); });
+
+    async function loadPmCurrent() {
+      if (!pmProvider) return;
+      const el = $('#pm-current');
+      let list = [];
+      try { list = await adminFetch('/admin/providers/' + pmProvider.id + '/models') || []; }
+      catch (e) { el.innerHTML = '<div class="empty">' + escHTML(e.message) + '</div>'; return; }
+      pmCurrentIds = new Set(list.map(m => m.upstream_id));
+      if (list.length === 0) {
+        el.innerHTML = '<div class="dim" style="color:var(--fg-sub);font-size:11px;padding:8px 0">大组里还没有该服务商的模型。下方拉取上游并勾选加入。</div>';
         return;
       }
-      let html = '<thead><tr>';
-      html += '<th>服务商</th><th>真实模型</th><th>计价 (in/out · USD/1M)</th><th>最近同步</th><th class="actions">操作</th>';
-      html += '</tr></thead><tbody>';
-      for (let i = 0; i < rows.length; i++) {
-        const m = rows[i];
+      let html = '<table><thead><tr><th>真实模型</th><th>计价 (in/out·USD/1M)</th><th class="actions">操作</th></tr></thead><tbody>';
+      for (const m of list) {
         html += '<tr>';
-        html += '<td class="dim">' + escHTML(m.provider || '#' + m.provider_id) + ' <span style="color:var(--fg-sub);font-size:10px">' + escHTML(m.format || '') + '</span></td>';
         html += '<td class="k mono" style="font-size:11px">' + escHTML(m.upstream_id) + '</td>';
         html += '<td>' + fmtPrice(m) + '</td>';
-        html += '<td class="dim">' + escHTML(fmtTime(m.last_seen_at)) + '</td>';
-        html += '<td class="actions"><button class="btn ghost" data-idx="' + i + '" style="padding:4px 10px;font-size:10px">改价</button></td>';
-        html += '</tr>';
+        html += '<td class="actions">';
+        html += '<button class="btn ghost" data-act="price" data-id="' + escHTML(m.upstream_id) + '" style="padding:3px 9px;font-size:10px;margin-right:6px">改价</button>';
+        html += '<button class="btn ghost" data-act="rm" data-id="' + escHTML(m.upstream_id) + '" style="padding:3px 9px;font-size:10px;color:var(--error)">移除</button>';
+        html += '</td></tr>';
       }
-      html += '</tbody>';
-      t.innerHTML = html;
-      t.querySelectorAll('button[data-idx]').forEach(btn => {
-        btn.addEventListener('click', () => openPriceModal(rows[parseInt(btn.dataset.idx, 10)]));
+      html += '</tbody></table>';
+      el.innerHTML = html;
+      el.querySelectorAll('button[data-act]').forEach(btn => {
+        const uid = btn.dataset.id;
+        btn.addEventListener('click', async () => {
+          if (btn.dataset.act === 'price') {
+            openPriceModal(list.find(x => x.upstream_id === uid));
+          } else {
+            if (!confirm('从大组移除 ' + uid + '？引用它的分组映射需另行清理。')) return;
+            try { await adminFetch('/admin/providers/' + pmProvider.id + '/models/' + encodeURIComponent(uid), { method: 'DELETE' }); loadPmCurrent(); }
+            catch (e) { alert('移除失败：' + e.message); }
+          }
+        });
       });
     }
 
-    // ---------- price modal ----------
-    let modalPriceTarget = null; // {provider_id, upstream_id}
+    $('#pm-fetch').addEventListener('click', async () => {
+      if (!pmProvider) return;
+      const el = $('#pm-catalog');
+      el.innerHTML = '<div class="dim" style="color:var(--fg-sub);font-size:11px;padding:8px 0">拉取中…</div>';
+      let ids = [];
+      try { const r = await adminFetch('/admin/providers/' + pmProvider.id + '/catalog'); ids = (r && r.models) || []; }
+      catch (e) { el.innerHTML = '<div class="empty">拉取失败：' + escHTML(e.message) + '</div>'; $('#pm-add').style.display = 'none'; return; }
+      const fresh = ids.filter(id => !pmCurrentIds.has(id));
+      if (ids.length === 0) { el.innerHTML = '<div class="dim" style="color:var(--fg-sub);font-size:11px;padding:8px 0">上游未返回模型。</div>'; $('#pm-add').style.display = 'none'; return; }
+      if (fresh.length === 0) { el.innerHTML = '<div class="dim" style="color:var(--fg-sub);font-size:11px;padding:8px 0">上游模型已全部在大组中。</div>'; $('#pm-add').style.display = 'none'; return; }
+      let html = '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:var(--fg-dim);margin:4px 0 8px;cursor:pointer"><input type="checkbox" id="pm-all" style="accent-color:var(--hero)"> 全选（' + fresh.length + ' 个未加入）</label>';
+      html += '<div class="model-check-grid">';
+      for (const id of fresh) {
+        html += '<label><input type="checkbox" class="pm-pick" value="' + escHTML(id) + '">' + escHTML(id) + '</label>';
+      }
+      html += '</div>';
+      el.innerHTML = html;
+      $('#pm-all').addEventListener('change', (e) => { el.querySelectorAll('.pm-pick').forEach(c => c.checked = e.target.checked); });
+      $('#pm-add').style.display = '';
+    });
+
+    $('#pm-add').addEventListener('click', async () => {
+      if (!pmProvider) return;
+      const picked = Array.from($('#pm-catalog').querySelectorAll('.pm-pick:checked')).map(c => c.value);
+      if (picked.length === 0) { alert('未选择任何模型'); return; }
+      try {
+        await adminFetch('/admin/providers/' + pmProvider.id + '/models', { method: 'POST', body: { upstream_ids: picked } });
+        await loadPmCurrent();
+        $('#pm-fetch').click(); // 重新拉取，已加入的从可选列表消失
+      } catch (e) { alert('添加失败：' + e.message); }
+    });
+
+    // ---------- price modal（在「管理模型」里改某模型的计价覆盖）----------
+    let modalPriceTarget = null; // {provider_id, upstream_id, price_*}
     function openPriceModal(m) {
       modalPriceTarget = m;
-      $('#mpr-sub').textContent = (m.provider || '#' + m.provider_id) + ' · ' + m.upstream_id;
+      $('#mpr-sub').textContent = (pmProvider ? pmProvider.name : ('#' + m.provider_id)) + ' · ' + m.upstream_id;
       $('#mpr-input').value = m.price_input != null ? m.price_input : '';
       $('#mpr-output').value = m.price_output != null ? m.price_output : '';
       $('#mpr-cw5').value = m.price_cache_write_5m != null ? m.price_cache_write_5m : '';
@@ -1690,7 +1742,7 @@
         await adminFetch('/admin/providers/' + m.provider_id + '/models/' + encodeURIComponent(m.upstream_id) + '/price',
           { method: 'POST', body });
         closePriceModal();
-        fetchModels();
+        loadPmCurrent();
       } catch (e) { alert('保存失败：' + e.message); }
     }
     $('#mpr-save').addEventListener('click', () => savePrice({
@@ -1733,7 +1785,7 @@
         html += '<td class="dim mono" style="font-size:11px">' + escHTML(p.masked_key || '—') + '</td>';
         html += '<td>' + (p.enabled ? '<span class="status-pill ok">启用</span>' : '<span class="status-pill revoked">停用</span>') + '</td>';
         html += '<td class="actions">';
-        html += '<button class="btn ghost" data-act="refresh" style="padding:4px 10px;font-size:10px;margin-right:6px">刷新模型</button>';
+        html += '<button class="btn ghost" data-act="manage" style="padding:4px 10px;font-size:10px;margin-right:6px">管理模型</button>';
         html += '<button class="btn ghost" data-act="edit" style="padding:4px 10px;font-size:10px;margin-right:6px">编辑</button>';
         html += '<button class="btn ghost" data-act="del" style="padding:4px 10px;font-size:10px;color:var(--error)">删除</button>';
         html += '</td></tr>';
@@ -1754,13 +1806,8 @@
               catch (e) { alert('删除失败：' + e.message); }
             } else if (act === 'edit') {
               openProvModal(p);
-            } else if (act === 'refresh') {
-              btn.textContent = '刷新中…'; btn.disabled = true;
-              try {
-                const r = await adminFetch('/admin/providers/' + id + '/refresh', { method: 'POST' });
-                alert('已发现 ' + (r.count || 0) + ' 个模型');
-              } catch (e) { alert('刷新失败：' + e.message); }
-              finally { btn.textContent = '刷新模型'; btn.disabled = false; }
+            } else if (act === 'manage') {
+              openModelMgmt(p);
             }
           });
         });

@@ -5,7 +5,7 @@
 - **字节级原样转发**:请求/响应 body 不重序列化,保证 prompt cache 正常命中
 - **多代理 key + 单上游 key**:用 `sk-proxy-` 前缀的虚拟 key 分发给不同消费者,统一回真实 Anthropic key
 - **每 key 独立策略**:每日预算上限、绑定一个分组作为可用模型白名单、备注、随时吊销
-- **多服务商 + 分组映射**:接入多家上游(服务商),自动发现其模型库存(大组),在分组里把库存映射成对外逻辑名;分组可设「透传服务商」整家放行。proxy key 绑定一个分组
+- **多服务商 + 分组映射**:接入多家上游(服务商),按需拉取其上游模型并手动选入模型库存(大组),在分组里把库存映射成对外逻辑名;分组可设「透传服务商」整家放行。proxy key 绑定一个分组
 - **成本核算**:按服务商-模型计价(可逐模型覆盖,缺省回落静态 Anthropic 价表) + 5m/1h ephemeral cache + web_search 次数实时计算 USD
 - **完整审计日志**:每条请求都记录到 SQLite,非 2xx 状态额外保存请求/响应 body 快照(单边截断到 256KB)
 - **管理面板**:`/admin/` 提供概览(9 卡 + 5 线折线图)、密钥管理、模型 curation、日志侧抽屉
@@ -72,8 +72,7 @@ admin token: <your token>
 浏览器访问 `http://127.0.0.1:8787/admin/`,在前端粘贴你的 admin token 登录,然后:
 
 - **密钥**页 → "新建密钥",填 owner / 每日预算 / 绑定分组,生成 `sk-proxy-xxxxxxxx` 给消费者
-- **服务商**页 → 接入上游、刷新模型库存;**分组**页 → 把库存映射成逻辑名或设透传服务商
-- **模型**页 → 给各服务商模型设按服务商的计价覆盖
+- **服务商**页 → 接入上游,点「管理模型」拉取上游目录、勾选加入大组并设价;**分组**页 → 把大组里的模型映射成逻辑名或设透传服务商
 - **日志**页 → 看每条请求详情,非 2xx 可在抽屉里查看完整 body
 - **概览**页 → 折线图看 token / 缓存 / 成本趋势
 
@@ -116,9 +115,11 @@ curl http://127.0.0.1:8787/v1/messages \
 | `POST /admin/keys` | 新建 key(body: `{owner, daily_budget, group_id, notes}`) |
 | `PATCH /admin/keys/<key>` | 修改 owner/预算/绑定分组/备注 |
 | `DELETE /admin/keys/<key>` | 吊销 |
-| `GET  /admin/models` | 列出各服务商大组库存(含按服务商计价覆盖) |
+| `GET  /admin/providers/<id>/catalog` | 拉取该服务商上游实时模型列表(不写库,供策展) |
+| `POST /admin/providers/<id>/models` | 批量把选中模型加入大组(body: `{upstream_ids:[...]}`) |
+| `DELETE /admin/providers/<id>/models/<upstream>` | 把模型移出大组 |
 | `POST /admin/providers/<id>/models/<upstream>/price` | 设/清某模型计价覆盖(body: `{input,output,cache_write_5m,cache_write_1h,cache_read}` 或 `{"clear":true}`) |
-| `GET/POST/PATCH/DELETE /admin/providers[/<id>...]` | 服务商 CRUD + `/refresh` 拉库存 + `/models` 列库存 |
+| `GET/POST/PATCH/DELETE /admin/providers[/<id>]` | 服务商 CRUD;`GET /<id>/models` 列已加入大组的模型 |
 | `GET/POST/PATCH/DELETE /admin/groups[/<id>/mappings...]` | 分组 + 逻辑名映射 CRUD;分组 PATCH 可设 `passthrough_provider_id` |
 | `GET  /admin/logs?proxy_key=&model=&status=&since=&until=&before_id=&limit=` | 请求日志列表,游标分页 |
 | `GET  /admin/logs/<id>` | 单条日志详情(含 4xx/5xx 时的请求/响应 body) |

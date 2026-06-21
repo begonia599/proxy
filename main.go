@@ -1,23 +1,24 @@
 // claude-proxy: 透明转发 Anthropic Messages API，副线记录用量到 SQLite。
 //
 // 设计原则：
-//   1. 请求/响应 body 永远字节级原样转发，绝不解析后再重组（缓存命中靠字节一致）
-//   2. 只动 header 里和"代理身份"必然冲突的部分：x-api-key、host、accept-encoding
-//   3. 用 tee 把响应 body 旁路一份给后台 goroutine 解析 usage，不阻塞主转发
-//   4. 用量入 SQLite，/admin/stats 提供查询，需 admin token
+//  1. 请求/响应 body 永远字节级原样转发，绝不解析后再重组（缓存命中靠字节一致）
+//  2. 只动 header 里和"代理身份"必然冲突的部分：x-api-key、host、accept-encoding
+//  3. 用 tee 把响应 body 旁路一份给后台 goroutine 解析 usage，不阻塞主转发
+//  4. 用量入 SQLite，/admin/stats 提供查询，需 admin token
 //
 // 文件分工：
-//   config.go  .env 解析 + Config
-//   usage.go   UsageRecord + usage 解析 + 入库
-//   tee.go     响应 body 旁路
-//   compat.go  OpenAI Chat Completions 兼容层
-//   compat_convert.go  OpenAI ↔ Anthropic 格式转换
-//   proxy.go   反向代理装配 + 转发 / v1/models 拦截 handler
-//   admin.go   /admin/* JSON API
-//   keys.go    proxy key 缓存
-//   routing.go 下游模型名 → 上游服务商/真实名解析（小组路由 + 透传）
-//   pricing.go 各模型 token 单价
-//   storage.go SQLite 持久化层
+//
+//	config.go  .env 解析 + Config
+//	usage.go   UsageRecord + usage 解析 + 入库
+//	tee.go     响应 body 旁路
+//	compat.go  OpenAI Chat Completions 兼容层
+//	compat_convert.go  OpenAI ↔ Anthropic 格式转换
+//	proxy.go   反向代理装配 + 转发 / v1/models 拦截 handler
+//	admin.go   /admin/* JSON API
+//	keys.go    proxy key 缓存
+//	routing.go 下游模型名 → 上游服务商/真实名解析（小组路由 + 透传）
+//	pricing.go 各模型 token 单价
+//	storage.go SQLite 持久化层
 package main
 
 import (
@@ -84,8 +85,8 @@ func main() {
 	if err := keys.Reload(); err != nil {
 		log.Fatalf("reload keys after default group: %v", err)
 	}
-	// 启动时刷新一次各服务商模型库存（失败不阻止启动）。
-	go providerRegistry.RefreshAll()
+	// 启动时给已加入大组的模型刷一次 last_seen（不自动添加新模型；失败不阻止启动）。
+	go providerRegistry.RefreshSeenAll()
 	providerRegistry.RunPeriodic(30 * time.Minute)
 
 	rp := buildReverseProxy(cfg)
@@ -101,7 +102,6 @@ func main() {
 	mux.HandleFunc("/admin/stats", adminStatsHandler(cfg))
 	mux.HandleFunc("/admin/keys", adminKeysHandler(cfg))
 	mux.HandleFunc("/admin/keys/", adminKeysHandler(cfg))
-	mux.HandleFunc("/admin/models", adminModelsHandler(cfg))
 	mux.HandleFunc("/admin/logs", adminLogsHandler(cfg))
 	mux.HandleFunc("/admin/logs/", adminLogsHandler(cfg))
 	mux.HandleFunc("/admin/timeseries", adminTimeseriesHandler(cfg))
