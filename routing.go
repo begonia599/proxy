@@ -3,16 +3,11 @@
 // 把 (proxy key, 请求模型名) 解析成一个 RouteTarget：去哪个服务商、用什么真实模型名、
 // 走什么协议格式。这是多上游架构的中枢。
 //
-// 解析优先级：
-//  1. key 绑定了小组（GroupID != nil）：小组即白名单。
-//     a. 逻辑名命中 → 取该逻辑名当前主用映射
-//     b. 否则按上游真实名回退（具体名兼容，现有 Claude Code 不改配置）
-//     c. 都没有 → not_found
-//  2. key 没绑小组（GroupID == nil，旧 key）：保持迁移前语义——
-//     a. 未知模型（ResolveAlias 查不到）→ not_found（省一次上游往返）
-//     b. 不在 allowed_models 白名单 → forbidden（403）
-//     c. 通过 → 回落默认服务商 anthropic-official，model 原样透传
-//     若默认服务商不存在 → 配置不完整错误。
+// 解析优先级（所有 key 都按其「有效小组」解析——自己绑的组，或未绑时回落默认透传组）：
+//  1. 逻辑名命中 → 取该逻辑名当前主用映射
+//  2. 否则按上游真实名回退（具体名兼容，现有 Claude Code 不改配置）
+//  3. 组设了透传服务商 → 模型原样透传（默认透传组即用此复刻旧 group_id=NULL 行为）
+//  4. 都没有 → not_found
 //
 // 不做自动故障转移：解析只挑"当前主用"那一条，上游报错原样回送下游。
 package main
@@ -51,43 +46,38 @@ func configErr(format string, a ...any) error {
 	return &resolveError{msg: fmt.Sprintf(format, a...)}
 }
 
+// effectiveGroupID 返回 key 实际生效的小组 id：自己绑的组，或未绑时回落默认透传组。
+// 返回 0 表示连默认组都没有（实例还没配任何服务商/组）。
+func effectiveGroupID(km *KeyMeta) int64 {
+	if km.GroupID != nil {
+		return *km.GroupID
+	}
+	return providerRegistry.DefaultGroupID()
+}
+
 // ResolveRoute 把 (key 元数据, 下游请求模型名) 解析为 RouteTarget。
 func ResolveRoute(km *KeyMeta, model string) (*RouteTarget, error) {
 	if model == "" {
 		return nil, notFoundErr("model is required")
 	}
-
-	// ── 绑定了小组：小组即白名单 ──
-	if km.GroupID != nil {
-		gid := *km.GroupID
-		// a. 逻辑名命中
-		if m, ok := providerRegistry.PrimaryMapping(gid, model); ok {
-			return buildTarget(m, model)
-		}
-		// b. 具体名兼容：按上游真实名回退
-		if m, ok := providerRegistry.MappingByUpstream(gid, model); ok {
-			return buildTarget(m, model)
-		}
-		return nil, notFoundErr("model not available in this key's group: %s", model)
+	gid := effectiveGroupID(km)
+	if gid == 0 {
+		return nil, configErr("no group configured (set up a provider/group in /admin)")
 	}
 
-	// ── 未绑小组（旧 key）：保持迁移前的校验语义 ──
-	// 未知模型直接拒（省一次上游往返）；注册表为空时 ResolveAlias fail-open 放行。
-	canonical, ok := modelRegistry.ResolveAlias(model)
-	if !ok {
-		return nil, notFoundErr("model not available via this proxy: %s", model)
+	// 1. 逻辑名命中
+	if m, ok := providerRegistry.PrimaryMapping(gid, model); ok {
+		return buildTarget(m, model)
 	}
-	// 旧 key 仍用 allowed_models 白名单（绑组的 key 不走这条）。
-	if !km.ModelAllowed(canonical) {
-		return nil, forbiddenErr("this proxy key is not permitted to use model: %s", model)
+	// 2. 具体名兼容：按上游真实名回退
+	if m, ok := providerRegistry.MappingByUpstream(gid, model); ok {
+		return buildTarget(m, model)
 	}
-
-	p, ok := defaultProvider()
-	if !ok {
-		return nil, configErr("no provider configured (set one in /admin or migrate .env key)")
+	// 3. 透传：组设了透传服务商 → 模型原样发给它
+	if p, ok := providerRegistry.PassthroughProvider(gid); ok {
+		return &RouteTarget{Provider: p, UpstreamID: model, LogicalName: model}, nil
 	}
-	// model 原样透传（保 prompt cache），不替换成 canonical——与迁移前行为一致。
-	return &RouteTarget{Provider: p, UpstreamID: model, LogicalName: model}, nil
+	return nil, notFoundErr("model not available in this key's group: %s", model)
 }
 
 // buildTarget 把一条映射变成 RouteTarget，校验它指向的服务商存在且启用。
@@ -100,13 +90,4 @@ func buildTarget(m GroupMapping, logical string) (*RouteTarget, error) {
 		return nil, configErr("provider %q is disabled", p.Name)
 	}
 	return &RouteTarget{Provider: p, UpstreamID: m.UpstreamID, LogicalName: logical}, nil
-}
-
-// defaultProvider 返回旧 key 的回落服务商：优先 anthropic-official，
-// 否则取任一启用的服务商（容忍管理员改了名字）。全程查内存缓存，不碰 DB（热路径）。
-func defaultProvider() (*Provider, bool) {
-	if p, ok := providerRegistry.ProviderByName(legacyProviderName); ok && p.Enabled {
-		return p, true
-	}
-	return providerRegistry.FirstEnabledProvider()
 }

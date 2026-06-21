@@ -170,6 +170,7 @@ func writeAnthropicError(w http.ResponseWriter, status int, errType, message str
 // extractProxyKey 兼容两种鉴权 header：
 //   - x-api-key（Anthropic 官方 SDK 用）
 //   - Authorization: Bearer <key>（OpenAI 风格，cc-switch 之类的工具会用这种来测连通性）
+//
 // 注意：Director 阶段会把这两个 header 都删掉再换成真实 key，所以这里只管接收。
 func extractProxyKey(r *http.Request) string {
 	if k := r.Header.Get("x-api-key"); k != "" {
@@ -307,9 +308,8 @@ func buildReverseProxy(cfg *Config) *httputil.ReverseProxy {
 	return rp
 }
 
-// modelsListHandler 拦截 /v1/models。
-//   - key 绑定了小组：列出该组的逻辑名（下游能用什么，这里就列什么）。
-//   - 未绑小组（旧 key）：回落到 curated.enabled ∩ allowed_models 的旧逻辑。
+// modelsListHandler 拦截 /v1/models。统一从 key 的有效小组取模型列表：
+// 显式映射的逻辑名 ∪ 透传服务商库存（见 GroupModelIDs）。
 func modelsListHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -323,24 +323,9 @@ func modelsListHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 			return
 		}
 
-		// 绑定小组 → 列逻辑名
-		if keyMeta.GroupID != nil {
-			names := providerRegistry.LogicalNames(*keyMeta.GroupID)
-			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write(anthropicModelsListFromNames(names))
-			return
-		}
-
-		body := modelRegistry.FilteredList(func(id string) bool {
-			return keyMeta.ModelAllowed(id)
-		})
-		if body == nil {
-			// 缓存还没起来，让请求走原始反向代理（catch-all 会处理）
-			rp.ServeHTTP(w, r)
-			return
-		}
+		names := providerRegistry.GroupModelIDs(effectiveGroupID(keyMeta))
 		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write(body)
+		_, _ = w.Write(anthropicModelsListFromNames(names))
 	}
 }
 
@@ -365,7 +350,7 @@ func anthropicModelsListFromNames(names []string) []byte {
 	return out
 }
 
-// modelDetailHandler 处理 /v1/models/{id}：allowlist 通不过的模型直接 404，否则透传。
+// modelDetailHandler 处理 /v1/models/{id}：能路由即视为存在并返回合成详情，否则 404。
 func modelDetailHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		proxyKey := extractProxyKey(r)
@@ -379,25 +364,14 @@ func modelDetailHandler(rp *httputil.ReverseProxy) http.HandlerFunc {
 			rp.ServeHTTP(w, r)
 			return
 		}
-		// 绑定小组：逻辑名或具体名能路由即视为存在。
-		if keyMeta.GroupID != nil {
-			if _, err := ResolveRoute(keyMeta, id); err != nil {
-				writeAnthropicError(w, http.StatusNotFound, "not_found_error",
-					fmt.Sprintf("model not available via this proxy: %s", id))
-				return
-			}
-			w.Header().Set("content-type", "application/json")
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"type":"model","id":%q,"display_name":%q}`, id, id)))
-			return
-		}
-		// ResolveAlias 解析短名到完整 ID，用完整 ID 查白名单（兼容短名白名单场景）。
-		canonical, ok := modelRegistry.ResolveAlias(id)
-		if !ok || !keyMeta.ModelAllowed(canonical) {
+		// 逻辑名 / 具体名 / 透传 能解析即视为存在。
+		if _, err := ResolveRoute(keyMeta, id); err != nil {
 			writeAnthropicError(w, http.StatusNotFound, "not_found_error",
 				fmt.Sprintf("model not available via this proxy: %s", id))
 			return
 		}
-		rp.ServeHTTP(w, r)
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"type":"model","id":%q,"display_name":%q}`, id, id)))
 	}
 }
 
@@ -541,6 +515,18 @@ func forwardHandler(cfg *Config, rp *httputil.ReverseProxy) http.HandlerFunc {
 					}, raw, nil)
 					return
 				}
+				// 无 model 的请求无法做格式翻译（出站翻译依赖 model 名）。透传到 openai 格式
+				// 上游会把 Anthropic 体发去 /v1/chat/completions，必然失败——直接拒绝更诚实。
+				if rt.Provider.Format == "openai" {
+					writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error",
+						"requests without a model field cannot be routed to an openai-format provider")
+					go writeRecord(&UsageRecord{
+						Time: time.Now(), ProxyKey: proxyKey, Endpoint: r.URL.Path, Method: r.Method,
+						Status: http.StatusBadRequest, Provider: rt.Provider.Name, ClientIP: clientIP(r),
+						UserAgent: r.Header.Get("user-agent"), StopReason: "proxy_rejected_nomodel_openai",
+					}, raw, nil)
+					return
+				}
 				r.Header.Set("x-proxy-provider", rt.Provider.Name)
 				r.Body = io.NopCloser(bytes.NewReader(raw))
 				r.ContentLength = int64(len(raw))
@@ -566,19 +552,20 @@ func classifyRouteError(err error) (int, string, string) {
 	return http.StatusServiceUnavailable, "api_error", "proxy_rejected_route"
 }
 
-// defaultRoute 给"无 model 字段"的请求挑一个上游目标。
-//   - 绑组 key：取组内任一映射的服务商（避免漏到主 key）；组空则配置错误。
-//   - 旧 key：默认服务商。
+// defaultRoute 给"无 model 字段"的请求挑一个上游目标。绝不回落主 key：
+//   - 优先组的透传服务商（默认组的天然出口）
+//   - 否则取组内任一映射指向的启用服务商
+//   - 都没有 → 配置错误（fail closed）
 func defaultRoute(km *KeyMeta) (*RouteTarget, error) {
-	if km.GroupID != nil {
-		if p, ok := providerRegistry.GroupAnyProvider(*km.GroupID); ok {
-			return &RouteTarget{Provider: p, LogicalName: ""}, nil
-		}
-		return nil, configErr("group has no usable mapping")
+	gid := effectiveGroupID(km)
+	if gid == 0 {
+		return nil, configErr("no group configured")
 	}
-	p, ok := defaultProvider()
-	if !ok {
-		return nil, configErr("no provider configured")
+	if p, ok := providerRegistry.PassthroughProvider(gid); ok {
+		return &RouteTarget{Provider: p, LogicalName: ""}, nil
 	}
-	return &RouteTarget{Provider: p, LogicalName: ""}, nil
+	if p, ok := providerRegistry.GroupAnyProvider(gid); ok {
+		return &RouteTarget{Provider: p, LogicalName: ""}, nil
+	}
+	return nil, configErr("group has no usable provider")
 }

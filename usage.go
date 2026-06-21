@@ -48,9 +48,15 @@ func truncBody(b []byte) []byte {
 }
 
 func writeRecord(r *UsageRecord, reqBody, respBody []byte) {
-	// 算成本：token 部分按模型价格 + web search 按次数
-	r.CostUSD = CostOf(r.Model, r.InputTokens, r.OutputTokens,
-		r.CacheCreate5m, r.CacheCreate1h, r.CacheRead) +
+	// 算成本：token 部分按「服务商-模型」计价（覆盖优先，回落静态 Anthropic 价表），
+	// web search 按次数。按上游真实模型名计价——逻辑名经映射后真正调用的是它；
+	// 缺失时退回下游请求名。
+	priceModel := r.UpstreamModel
+	if priceModel == "" {
+		priceModel = r.Model
+	}
+	r.CostUSD = tokenCost(r.Provider, priceModel,
+		r.InputTokens, r.OutputTokens, r.CacheCreate5m, r.CacheCreate1h, r.CacheRead) +
 		WebSearchCost(r.WebSearchCount)
 
 	rowID, err := store.Insert(r)

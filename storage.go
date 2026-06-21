@@ -130,13 +130,23 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 // 历史 db 升级用：列已存在时 ALTER 会报错，忽略即可
 var migrations = []string{
 	"ALTER TABLE requests ADD COLUMN web_search_count INTEGER NOT NULL DEFAULT 0",
-	// 多服务商：proxy key 绑定的小组（NULL = 旧行为，回落 allowed_models）
+	// 多服务商：proxy key 绑定的小组（NULL = 回落默认透传组）
 	"ALTER TABLE proxy_keys ADD COLUMN group_id INTEGER",
 	// 多服务商：请求归因到具体上游 + 上游真实模型名（model 列仍存下游请求名）
 	"ALTER TABLE requests ADD COLUMN provider TEXT",
 	"ALTER TABLE requests ADD COLUMN upstream_model TEXT",
 	// 用户系统：密钥归属 = 创建者。NULL = 迁移前建的，启动时回填 admin。
 	"ALTER TABLE proxy_keys ADD COLUMN creator TEXT",
+	// 模型层合并：小组可设「透传服务商」——未命中显式映射时把模型原样发给它。
+	// 默认组用它复刻旧 group_id=NULL 的行为（任意模型透传给默认服务商）。
+	"ALTER TABLE groups ADD COLUMN passthrough_provider_id INTEGER",
+	// 按服务商-模型计价（修复非 Anthropic 上游被记 $0 的 bug）。
+	// NULL = 未设，回落静态 Anthropic 价表。单位 USD / 1M tokens。
+	"ALTER TABLE provider_models ADD COLUMN price_input REAL",
+	"ALTER TABLE provider_models ADD COLUMN price_output REAL",
+	"ALTER TABLE provider_models ADD COLUMN price_cache_write_5m REAL",
+	"ALTER TABLE provider_models ADD COLUMN price_cache_write_1h REAL",
+	"ALTER TABLE provider_models ADD COLUMN price_cache_read REAL",
 }
 
 type Store struct {
@@ -371,85 +381,6 @@ func (s *Store) Stats(f StatsFilter) (*StatsResult, error) {
 	}
 
 	return result, nil
-}
-
-// ---------- curated_models ----------
-
-type CuratedModel struct {
-	ModelID     string    `json:"model_id"`
-	Enabled     bool      `json:"enabled"`
-	FirstSeenAt time.Time `json:"first_seen_at"`
-	LastSeenAt  time.Time `json:"last_seen_at"`
-}
-
-// UpsertCuratedModel 在上游列表里看到该 model 时调用：
-//   - 第一次见 → 插入，enabled=1（默认放行新模型）
-//   - 已见过 → 更新 last_seen_at；不动 enabled（保留管理员配置）
-func (s *Store) UpsertCuratedModel(modelID string, seenAt time.Time) error {
-	ms := seenAt.UnixMilli()
-	_, err := s.db.Exec(`
-INSERT INTO curated_models (model_id, enabled, first_seen_at, last_seen_at)
-VALUES (?, 1, ?, ?)
-ON CONFLICT(model_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
-		modelID, ms, ms)
-	return err
-}
-
-func (s *Store) ListCuratedModels() ([]CuratedModel, error) {
-	rows, err := s.db.Query(
-		"SELECT model_id, enabled, first_seen_at, last_seen_at FROM curated_models ORDER BY model_id")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []CuratedModel
-	for rows.Next() {
-		var m CuratedModel
-		var enabled int
-		var firstMs, lastMs int64
-		if err := rows.Scan(&m.ModelID, &enabled, &firstMs, &lastMs); err != nil {
-			return nil, err
-		}
-		m.Enabled = enabled != 0
-		m.FirstSeenAt = time.UnixMilli(firstMs)
-		m.LastSeenAt = time.UnixMilli(lastMs)
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
-
-// EnabledModelIDs 返回当前可用模型 ID 集合，用于 ModelRegistry.valid。
-func (s *Store) EnabledModelIDs() (map[string]bool, error) {
-	rows, err := s.db.Query("SELECT model_id FROM curated_models WHERE enabled = 1")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]bool{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out[id] = true
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) SetModelEnabled(modelID string, enabled bool) error {
-	v := 0
-	if enabled {
-		v = 1
-	}
-	res, err := s.db.Exec("UPDATE curated_models SET enabled = ? WHERE model_id = ?", v, modelID)
-	if err != nil {
-		return err
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("model not found: %s", modelID)
-	}
-	return nil
 }
 
 // ---------- 时序聚合 ----------

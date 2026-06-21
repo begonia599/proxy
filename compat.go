@@ -4,7 +4,7 @@
 // 转成 Anthropic Messages 格式发上游，再把响应转回 OpenAI 格式。
 //
 // 不走 httputil.ReverseProxy（需要双向 body 转换），直接 http.Client 调上游。
-// 鉴权、预算、模型校验复用现有 extractProxyKey / KeyCache / ModelRegistry。
+// 鉴权、预算复用现有 extractProxyKey / KeyCache；模型校验复用 ResolveRoute。
 // 用量追踪复用 parseUsageJSON / parseUsageSSE + writeRecord 管线。
 package main
 
@@ -19,8 +19,6 @@ import (
 	"strings"
 	"time"
 )
-
-var compatClient = &http.Client{Timeout: 5 * time.Minute}
 
 // ────────────────────── 错误输出 ──────────────────────
 
@@ -293,18 +291,8 @@ func openaiModelsHandler() http.HandlerFunc {
 			return
 		}
 
-		// 绑定小组 → 列逻辑名
-		var ids []string
-		if keyMeta.GroupID != nil {
-			ids = providerRegistry.LogicalNames(*keyMeta.GroupID)
-		} else {
-			allowed := func(id string) bool { return keyMeta.ModelAllowed(id) }
-			ids = modelRegistry.FilteredModelIDs(allowed)
-			// registry 未加载（fail-open）→ 直接问上游，再按 key 白名单过滤后转 OpenAI 格式
-			if ids == nil {
-				ids = fetchUpstreamModelIDs(allowed)
-			}
-		}
+		// 统一从 key 的有效小组取模型列表（逻辑名 ∪ 透传服务商库存）。
+		ids := providerRegistry.GroupModelIDs(effectiveGroupID(keyMeta))
 
 		now := time.Now().Unix()
 		entries := make([]oaiModelEntry, len(ids))
@@ -323,31 +311,4 @@ func openaiModelsHandler() http.HandlerFunc {
 			Data:   entries,
 		})
 	}
-}
-
-// fetchUpstreamModelIDs registry 未加载时的回落：直接拉上游 /v1/models，
-// 返回通过 allowed 过滤后的模型 ID 列表。失败返回 nil。
-func fetchUpstreamModelIDs(allowed func(string) bool) []string {
-	resp, err := compatClient.Get(upstreamURL + "/v1/models?limit=100")
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	var body struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil
-	}
-
-	var ids []string
-	for _, m := range body.Data {
-		if m.ID != "" && allowed(m.ID) {
-			ids = append(ids, m.ID)
-		}
-	}
-	return ids
 }

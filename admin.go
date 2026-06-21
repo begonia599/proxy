@@ -66,7 +66,7 @@ func adminStatsHandler(cfg *Config) http.HandlerFunc {
 
 // adminKeysHandler 处理 /admin/keys 与 /admin/keys/{key}：
 //   GET    /admin/keys              列出全部（?include_revoked=true 含撤销）
-//   POST   /admin/keys              创建（body: owner/daily_budget/allowed_models/notes）
+//   POST   /admin/keys              创建（body: owner/daily_budget/group_id/notes）
 //   GET    /admin/keys/{key}        取单条
 //   PATCH  /admin/keys/{key}        部分更新
 //   DELETE /admin/keys/{key}        软撤销（revoked_at = now）
@@ -114,11 +114,10 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 				return
 			}
 			var req struct {
-				Owner         string  `json:"owner"`
-				DailyBudget   float64 `json:"daily_budget"`
-				AllowedModels string  `json:"allowed_models"`
-				GroupID       *int64  `json:"group_id"`
-				Notes         string  `json:"notes"`
+				Owner       string  `json:"owner"`
+				DailyBudget float64 `json:"daily_budget"`
+				GroupID     *int64  `json:"group_id"`
+				Notes       string  `json:"notes"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
@@ -135,13 +134,12 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 				return
 			}
 			km := &KeyMeta{
-				Key:           newKey,
-				Owner:         owner,
-				Creator:       user.Username, // 归属钉死为创建者，后端填，不接受前端值
-				DailyBudget:   req.DailyBudget,
-				AllowedModels: req.AllowedModels,
-				GroupID:       req.GroupID,
-				Notes:         req.Notes,
+				Key:         newKey,
+				Owner:       owner,
+				Creator:     user.Username, // 归属钉死为创建者，后端填，不接受前端值
+				DailyBudget: req.DailyBudget,
+				GroupID:     req.GroupID,
+				Notes:       req.Notes,
 			}
 			if err := store.CreateKey(km); err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
@@ -213,61 +211,58 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 	return requireAuth(h)
 }
 
-// adminModelsHandler 处理 /admin/models 与 /admin/models/{id}：
-//   GET   /admin/models           列出全部 curated 模型（enabled + 时间戳）
-//   PATCH /admin/models/{id}      切换 enabled（body: {"enabled":true|false}）
-// PATCH 后必须 modelRegistry.ReloadFromDB() 让 IsKnown 立即生效。
+// providerModelView 是「模型」页的统一视图：跨服务商的大组库存 + 计价覆盖。
+type providerModelView struct {
+	ProviderID        int64    `json:"provider_id"`
+	Provider          string   `json:"provider"`
+	Format            string   `json:"format"`
+	UpstreamID        string   `json:"upstream_id"`
+	PriceInput        *float64 `json:"price_input"`
+	PriceOutput       *float64 `json:"price_output"`
+	PriceCacheWrite5m *float64 `json:"price_cache_write_5m"`
+	PriceCacheWrite1h *float64 `json:"price_cache_write_1h"`
+	PriceCacheRead    *float64 `json:"price_cache_read"`
+	FirstSeenAt       int64    `json:"first_seen_at"`
+	LastSeenAt        int64    `json:"last_seen_at"`
+}
+
+// adminModelsHandler 处理 GET /admin/models：返回所有服务商的大组库存（含计价覆盖）。
+// 模型层合并后，这里是「模型」页的统一数据源——取代旧 curated_models。
+// 改价走 /admin/providers/{id}/models/{upstream}/price；停用模型 = 从分组里移除映射。
 func adminModelsHandler(cfg *Config) http.HandlerFunc {
 	h := func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("content-type", "application/json")
 
-		path := strings.TrimPrefix(r.URL.Path, "/admin/models")
-		path = strings.TrimPrefix(path, "/")
-
-		switch r.Method {
-		case http.MethodGet:
-			if path != "" {
-				http.Error(w, `{"error":"GET single not supported, use list"}`, http.StatusBadRequest)
-				return
-			}
-			list, err := store.ListCuratedModels()
-			if err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-				return
-			}
-			if list == nil {
-				list = []CuratedModel{}
-			}
-			_ = json.NewEncoder(w).Encode(list)
-
-		case http.MethodPatch:
-			if path == "" {
-				http.Error(w, `{"error":"model id required in path"}`, http.StatusBadRequest)
-				return
-			}
-			var req struct {
-				Enabled *bool `json:"enabled"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-				return
-			}
-			if req.Enabled == nil {
-				http.Error(w, `{"error":"enabled field required"}`, http.StatusBadRequest)
-				return
-			}
-			if err := store.SetModelEnabled(path, *req.Enabled); err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
-				return
-			}
-			if err := modelRegistry.ReloadFromDB(); err != nil {
-				log.Printf("model registry reload after toggle: %v", err)
-			}
-			_, _ = w.Write([]byte(`{"ok":true}`))
-
-		default:
-			http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		provs, err := store.ListProviders()
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
 		}
+		meta := make(map[int64]Provider, len(provs))
+		for _, p := range provs {
+			meta[p.ID] = p
+		}
+		models, err := store.ListAllProviderModels()
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		out := make([]providerModelView, 0, len(models))
+		for _, m := range models {
+			p := meta[m.ProviderID]
+			out = append(out, providerModelView{
+				ProviderID: m.ProviderID, Provider: p.Name, Format: p.Format, UpstreamID: m.UpstreamID,
+				PriceInput: m.PriceInput, PriceOutput: m.PriceOutput,
+				PriceCacheWrite5m: m.PriceCacheWrite5m, PriceCacheWrite1h: m.PriceCacheWrite1h,
+				PriceCacheRead: m.PriceCacheRead,
+				FirstSeenAt:    m.FirstSeenAt.UnixMilli(), LastSeenAt: m.LastSeenAt.UnixMilli(),
+			})
+		}
+		_ = json.NewEncoder(w).Encode(out)
 	}
 	return requireAuth(h)
 }

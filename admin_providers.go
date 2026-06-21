@@ -181,6 +181,54 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 			}
 			_ = json.NewEncoder(w).Encode(models)
 
+		// POST /admin/providers/{id}/models/{upstream}/price —— 设/清按服务商计价覆盖。
+		// upstream 真实名可能含 "/"（如 openrouter 的 anthropic/claude-...），
+		// 故用前后缀切割而非按段解析。
+		case r.Method == http.MethodPost && strings.HasPrefix(sub, "models/") && strings.HasSuffix(sub, "/price"):
+			id, ok := parseID(w, idPart)
+			if !ok {
+				return
+			}
+			upstream := strings.TrimSuffix(strings.TrimPrefix(sub, "models/"), "/price")
+			if upstream == "" {
+				http.Error(w, `{"error":"upstream model id required in path"}`, http.StatusBadRequest)
+				return
+			}
+			var req struct {
+				Clear        bool     `json:"clear"`
+				Input        *float64 `json:"input"`
+				Output       *float64 `json:"output"`
+				CacheWrite5m *float64 `json:"cache_write_5m"`
+				CacheWrite1h *float64 `json:"cache_write_1h"`
+				CacheRead    *float64 `json:"cache_read"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+				return
+			}
+			var price *Price
+			if !req.Clear {
+				price = &Price{
+					Input:        derefFloat(req.Input),
+					Output:       derefFloat(req.Output),
+					CacheWrite5m: derefFloat(req.CacheWrite5m),
+					CacheWrite1h: derefFloat(req.CacheWrite1h),
+					CacheRead:    derefFloat(req.CacheRead),
+				}
+				// 防退化覆盖：omitted 字段被 derefFloat 归 0 并存为非 NULL，会把对应 token
+				// 计成 $0。要求 input/output 必须 > 0；缓存项留空(=0)是合法的"不计缓存"。
+				if price.Input <= 0 || price.Output <= 0 {
+					http.Error(w, `{"error":"input and output price must be > 0; use {\"clear\":true} to remove the override"}`, http.StatusBadRequest)
+					return
+				}
+			}
+			if err := store.SetProviderModelPrice(id, upstream, price); err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+				return
+			}
+			reloadProviders()
+			_, _ = w.Write([]byte(`{"ok":true}`))
+
 		default:
 			http.Error(w, `{"error":"method/path not supported"}`, http.StatusBadRequest)
 		}
@@ -258,8 +306,10 @@ func adminGroupsHandler(cfg *Config) http.HandlerFunc {
 			switch r.Method {
 			case http.MethodPatch:
 				var req struct {
-					Name  *string `json:"name"`
-					Notes *string `json:"notes"`
+					Name                  *string `json:"name"`
+					Notes                 *string `json:"notes"`
+					PassthroughProviderID *int64  `json:"passthrough_provider_id"`
+					ClearPassthrough      bool    `json:"clear_passthrough"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
@@ -269,11 +319,34 @@ func adminGroupsHandler(cfg *Config) http.HandlerFunc {
 					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
 					return
 				}
+				// 透传服务商：clear_passthrough=true 清空；否则给了 id 就设。影响路由，需 reload。
+				if req.ClearPassthrough {
+					if err := store.SetGroupPassthrough(id, nil); err != nil {
+						http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+						return
+					}
+				} else if req.PassthroughProviderID != nil {
+					if err := store.SetGroupPassthrough(id, req.PassthroughProviderID); err != nil {
+						http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
+						return
+					}
+				}
+				reloadProviders()
 				_, _ = w.Write([]byte(`{"ok":true}`))
 			case http.MethodDelete:
+				// 默认透传组是兜底，删了会让回落它的 key 全失配；拒绝。
+				if id == providerRegistry.DefaultGroupID() {
+					http.Error(w, `{"error":"cannot delete the default group"}`, http.StatusBadRequest)
+					return
+				}
 				if err := store.DeleteGroup(id); err != nil {
 					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
 					return
+				}
+				// 先刷 key 缓存（DeleteGroup 已把它们 group_id 置 NULL → 回落默认组），
+				// 再刷 registry 丢弃该组，避免中间窗口出现 key 指向已不存在的组。
+				if err := keys.Reload(); err != nil {
+					log.Printf("keys reload after group delete: %v", err)
 				}
 				reloadProviders()
 				_, _ = w.Write([]byte(`{"ok":true}`))

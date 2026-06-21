@@ -809,6 +809,11 @@
             <span class="rule"></span>
             <div class="right"><button class="btn ghost" id="grp-add-mapping" style="display:none">添加映射</button></div>
           </div>
+          <div id="grp-passthrough-row" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 16px;padding:10px 12px;border:1px solid var(--rule);border-radius:2px">
+            <span style="font-size:11px;color:var(--fg-dim)">透传服务商</span>
+            <select id="grp-passthrough" style="min-width:180px"></select>
+            <span style="font-size:10px;color:var(--fg-sub);flex:1;min-width:200px">未命中映射的模型原样发给它（= 该服务商全量放行）；选「无」则仅允许下方已映射的逻辑名。</span>
+          </div>
           <table id="mappings-table"></table>
         </div>
       </div>
@@ -817,13 +822,14 @@
     <!-- ============ MODELS ============ -->
     <section id="view-models" class="view">
       <div class="section-head" style="margin-top: 8px">
-        <h2>模型列表</h2>
-        <span class="h-serif">何可用</span>
+        <h2>模型与计价</h2>
+        <span class="h-serif">大组库存</span>
         <span class="rule"></span>
         <span class="count" id="models-count">— 行</span>
       </div>
       <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
-        每 30 分钟从上游同步一次。停用后该模型立即不可经此网关调用。
+        各服务商每 30 分钟自动同步一次的模型库存（大组）。在这里给每个模型设按服务商的计价覆盖；
+        未设则回落静态 Anthropic 价表——非 Anthropic 上游若不设价会被记 $0。模型的可用性由「分组」决定（组即白名单）。
       </p>
       <table id="models-table"></table>
     </section>
@@ -914,14 +920,8 @@
       </div>
       <div class="grid full">
         <div class="field">
-          <label>绑定分组 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">绑定后用分组的逻辑名作白名单，下方「允许模型」忽略</span></label>
-          <select id="mk-group"><option value="">— 不绑定（用允许模型）—</option></select>
-        </div>
-      </div>
-      <div class="grid full">
-        <div class="field">
-          <label>允许模型 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">不勾选任何则允许全部；绑定分组时此项无效</span></label>
-          <div class="model-check-grid" id="mk-models"></div>
+          <label>绑定分组 <span style="color:var(--fg-sub);font-size:9px;margin-left:8px">分组即该密钥的可用模型白名单；不选则用默认透传组（全量）</span></label>
+          <select id="mk-group"><option value="">— 默认透传组（全量）—</option></select>
         </div>
       </div>
       <div class="actions">
@@ -983,6 +983,32 @@
       <div class="actions">
         <button class="btn ghost" id="mm-cancel">取消</button>
         <button class="btn" id="mm-save">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- provider-model price modal -->
+  <div class="modal-bg" id="modal-price-bg">
+    <div class="modal">
+      <h3>设置计价 <span id="mpr-sub" style="color:var(--fg-sub);font-size:11px;margin-left:8px;font-weight:400"></span></h3>
+      <p style="color:var(--fg-dim);font-size:11px;margin:0 0 18px;letter-spacing:0.02em">
+        单位 USD / 1M tokens。输入/输出必填(&gt;0);缓存项留空记为 $0(即不单独计缓存)。点「清除」让整条回落静态 Anthropic 价表(非 Anthropic 上游将记 $0)。
+      </p>
+      <div class="grid">
+        <div class="field"><label>输入</label><input id="mpr-input" type="number" min="0" step="0.01" placeholder="0"></div>
+        <div class="field"><label>输出</label><input id="mpr-output" type="number" min="0" step="0.01" placeholder="0"></div>
+      </div>
+      <div class="grid">
+        <div class="field"><label>缓存写 5m</label><input id="mpr-cw5" type="number" min="0" step="0.01" placeholder="0"></div>
+        <div class="field"><label>缓存写 1h</label><input id="mpr-cw1" type="number" min="0" step="0.01" placeholder="0"></div>
+      </div>
+      <div class="grid full">
+        <div class="field"><label>缓存读</label><input id="mpr-cr" type="number" min="0" step="0.01" placeholder="0"></div>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="mpr-clear" style="color:var(--error);margin-right:auto">清除（用默认价表）</button>
+        <button class="btn ghost" id="mpr-cancel">取消</button>
+        <button class="btn" id="mpr-save">保存</button>
       </div>
     </div>
   </div>
@@ -1462,7 +1488,6 @@
     // =================================================
     // KEYS
     // =================================================
-    let modelOptionsCache = []; // for create modal
     let groupsCache = []; // 分组列表缓存，给 key 绑定下拉用
 
     $('#show-revoked').addEventListener('change', fetchKeys);
@@ -1472,16 +1497,18 @@
       try {
         const inc = $('#show-revoked').checked ? '?include_revoked=true' : '';
         const list = await adminFetch('/admin/keys' + inc);
-        renderKeys(list || []);
-        // refresh model cache for create modal
-        if (!modelOptionsCache.length) {
-          try { modelOptionsCache = await adminFetch('/admin/models'); } catch (e) {}
-        }
-        // 分组列表（给绑定下拉）——每次刷新，分组可能有增删
+        // 分组列表（给绑定下拉 + 列表显示）——先取，renderKeys 要用名字
         try { groupsCache = await adminFetch('/admin/groups') || []; } catch (e) {}
+        renderKeys(list || []);
       } catch (e) {
         $('#keys-table').innerHTML = '<tbody><tr><td class="empty" colspan="7">' + escHTML(e.message) + '</td></tr></tbody>';
       }
+    }
+
+    function groupName(id) {
+      if (id == null) return '默认透传组';
+      const g = groupsCache.find(x => x.id === id);
+      return g ? g.name : ('#' + id);
     }
 
     function renderKeys(rows) {
@@ -1491,19 +1518,16 @@
         return;
       }
       let html = '<thead><tr>';
-      html += '<th>密钥</th><th>归属</th><th>备注</th><th class="num">日预算</th><th>允许模型</th><th>创建</th><th>状态</th><th class="actions">操作</th>';
+      html += '<th>密钥</th><th>归属</th><th>备注</th><th class="num">日预算</th><th>分组</th><th>创建</th><th>状态</th><th class="actions">操作</th>';
       html += '</tr></thead><tbody>';
       for (const k of rows) {
         const revoked = !!k.revoked_at;
-        const allowed = (k.allowed_models === '*' || !k.allowed_models) ? '全部' : (() => {
-          try { const a = JSON.parse(k.allowed_models); return a.length + ' 个'; } catch { return '自定义'; }
-        })();
         html += '<tr data-key="' + escHTML(k.key) + '">';
         html += '<td class="k mono" title="' + escHTML(k.key) + '">' + escHTML(truncKey(k.key)) + '</td>';
         html += '<td class="dim" title="创建者（不可转让）">' + escHTML(k.creator || '—') + '</td>';
         html += '<td class="dim">' + escHTML(k.owner || '—') + '</td>';
         html += '<td class="num ' + (k.daily_budget > 0 ? 'cost' : 'zero') + '">' + (k.daily_budget > 0 ? fmtCost(k.daily_budget) : '无限') + '</td>';
-        html += '<td class="dim">' + escHTML(allowed) + '</td>';
+        html += '<td class="dim">' + escHTML(groupName(k.group_id != null ? k.group_id : null)) + '</td>';
         html += '<td class="dim">' + escHTML(fmtTime(k.created_at)) + '</td>';
         html += '<td>' + (revoked
           ? '<span class="status-pill revoked">已撤销</span>'
@@ -1552,24 +1576,11 @@
       $('#mk-budget').value = km && km.daily_budget ? km.daily_budget : '';
       $('#mk-notes').value = km ? (km.notes || '') : '';
 
-      // group dropdown
+      // group dropdown（不选 = 默认透传组）
       const gsel = $('#mk-group');
-      gsel.innerHTML = '<option value="">— 不绑定（用允许模型）—</option>' +
+      gsel.innerHTML = '<option value="">— 默认透传组（全量）—</option>' +
         groupsCache.map(g => '<option value="' + g.id + '">' + escHTML(g.name) + '</option>').join('');
       gsel.value = (km && km.group_id) ? String(km.group_id) : '';
-
-      // model checkboxes
-      let allowed = null;
-      if (km && km.allowed_models && km.allowed_models !== '*') {
-        try { allowed = JSON.parse(km.allowed_models); } catch { allowed = []; }
-      }
-      const grid = $('#mk-models');
-      grid.innerHTML = (modelOptionsCache.length === 0
-        ? '<div class="dim" style="grid-column:1/-1;color:var(--fg-sub)">模型列表加载中或为空</div>'
-        : modelOptionsCache.filter(m => m.enabled).map(m => {
-          const checked = allowed ? allowed.includes(m.model_id) : false;
-          return '<label><input type="checkbox" value="' + escHTML(m.model_id) + '"' + (checked ? ' checked' : '') + '>' + escHTML(m.model_id) + '</label>';
-        }).join(''));
 
       $('#modal-key-bg').classList.add('active');
     }
@@ -1578,13 +1589,10 @@
       if (e.target === $('#modal-key-bg')) $('#modal-key-bg').classList.remove('active');
     });
     $('#mk-save').addEventListener('click', async () => {
-      const checked = Array.from($('#mk-models').querySelectorAll('input:checked')).map(i => i.value);
-      const allowed_models = checked.length === 0 ? '*' : JSON.stringify(checked);
       const groupVal = $('#mk-group').value;
       const body = {
         owner: $('#mk-owner').value.trim(),
         daily_budget: parseFloat($('#mk-budget').value) || 0,
-        allowed_models,
         notes: $('#mk-notes').value.trim(),
       };
       try {
@@ -1592,10 +1600,9 @@
           const patchBody = {
             owner: body.owner,
             daily_budget: body.daily_budget,
-            allowed_models: body.allowed_models,
             notes: body.notes,
           };
-          // 分组：选了 → group_id；空 → clear_group 解绑
+          // 分组：选了 → group_id；空 → clear_group（回落默认透传组）
           if (groupVal) patchBody.group_id = parseInt(groupVal, 10);
           else patchBody.clear_group = true;
           await adminFetch('/admin/keys/' + encodeURIComponent(modalKeyEditing.key), {
@@ -1618,53 +1625,82 @@
     });
 
     // =================================================
-    // MODELS
+    // MODELS（大组库存 + 按服务商计价）
     // =================================================
+    let modelsCache = [];
     async function fetchModels() {
       try {
-        const list = await adminFetch('/admin/models');
-        renderModels(list || []);
+        modelsCache = await adminFetch('/admin/models') || [];
+        renderModels(modelsCache);
       } catch (e) {
-        $('#models-table').innerHTML = '<tbody><tr><td class="empty" colspan="4">' + escHTML(e.message) + '</td></tr></tbody>';
+        $('#models-table').innerHTML = '<tbody><tr><td class="empty" colspan="5">' + escHTML(e.message) + '</td></tr></tbody>';
       }
+    }
+    function fmtPrice(m) {
+      if (m.price_input == null && m.price_output == null) return '<span class="dim" style="color:var(--fg-sub)">默认价表</span>';
+      const io = (m.price_input != null ? '$' + m.price_input : '$0') + ' / ' + (m.price_output != null ? '$' + m.price_output : '$0');
+      return '<span class="mono" style="font-size:11px">' + escHTML(io) + '</span>';
     }
     function renderModels(rows) {
       $('#models-count').textContent = rows.length + ' 个';
       const t = $('#models-table');
       if (rows.length === 0) {
-        t.innerHTML = '<tbody><tr><td class="empty" colspan="4">尚未同步到模型列表</td></tr></tbody>';
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="5">尚无库存。去「服务商」页新建服务商或点「刷新模型」。</td></tr></tbody>';
         return;
       }
       let html = '<thead><tr>';
-      html += '<th>模型 ID</th><th>状态</th><th>首次见到</th><th>最近见到</th>';
+      html += '<th>服务商</th><th>真实模型</th><th>计价 (in/out · USD/1M)</th><th>最近同步</th><th class="actions">操作</th>';
       html += '</tr></thead><tbody>';
-      for (const m of rows) {
+      for (let i = 0; i < rows.length; i++) {
+        const m = rows[i];
         html += '<tr>';
-        html += '<td class="k">' + escHTML(m.model_id) + '</td>';
-        html += '<td><div class="toggle ' + (m.enabled ? 'on' : '') + '" data-id="' + escHTML(m.model_id) + '"></div></td>';
-        html += '<td class="dim">' + escHTML(fmtTime(m.first_seen_at)) + '</td>';
+        html += '<td class="dim">' + escHTML(m.provider || '#' + m.provider_id) + ' <span style="color:var(--fg-sub);font-size:10px">' + escHTML(m.format || '') + '</span></td>';
+        html += '<td class="k mono" style="font-size:11px">' + escHTML(m.upstream_id) + '</td>';
+        html += '<td>' + fmtPrice(m) + '</td>';
         html += '<td class="dim">' + escHTML(fmtTime(m.last_seen_at)) + '</td>';
+        html += '<td class="actions"><button class="btn ghost" data-idx="' + i + '" style="padding:4px 10px;font-size:10px">改价</button></td>';
         html += '</tr>';
       }
       html += '</tbody>';
       t.innerHTML = html;
-
-      t.querySelectorAll('.toggle').forEach(tg => {
-        tg.addEventListener('click', async () => {
-          const id = tg.dataset.id;
-          const nextEnabled = !tg.classList.contains('on');
-          tg.classList.toggle('on'); // optimistic
-          try {
-            await adminFetch('/admin/models/' + encodeURIComponent(id), {
-              method: 'PATCH', body: { enabled: nextEnabled },
-            });
-          } catch (e) {
-            tg.classList.toggle('on'); // rollback
-            alert('切换失败：' + e.message);
-          }
-        });
+      t.querySelectorAll('button[data-idx]').forEach(btn => {
+        btn.addEventListener('click', () => openPriceModal(rows[parseInt(btn.dataset.idx, 10)]));
       });
     }
+
+    // ---------- price modal ----------
+    let modalPriceTarget = null; // {provider_id, upstream_id}
+    function openPriceModal(m) {
+      modalPriceTarget = m;
+      $('#mpr-sub').textContent = (m.provider || '#' + m.provider_id) + ' · ' + m.upstream_id;
+      $('#mpr-input').value = m.price_input != null ? m.price_input : '';
+      $('#mpr-output').value = m.price_output != null ? m.price_output : '';
+      $('#mpr-cw5').value = m.price_cache_write_5m != null ? m.price_cache_write_5m : '';
+      $('#mpr-cw1').value = m.price_cache_write_1h != null ? m.price_cache_write_1h : '';
+      $('#mpr-cr').value = m.price_cache_read != null ? m.price_cache_read : '';
+      $('#modal-price-bg').classList.add('active');
+    }
+    function closePriceModal() { $('#modal-price-bg').classList.remove('active'); }
+    $('#mpr-cancel').addEventListener('click', closePriceModal);
+    $('#modal-price-bg').addEventListener('click', (e) => { if (e.target === $('#modal-price-bg')) closePriceModal(); });
+    async function savePrice(body) {
+      const m = modalPriceTarget;
+      if (!m) return;
+      try {
+        await adminFetch('/admin/providers/' + m.provider_id + '/models/' + encodeURIComponent(m.upstream_id) + '/price',
+          { method: 'POST', body });
+        closePriceModal();
+        fetchModels();
+      } catch (e) { alert('保存失败：' + e.message); }
+    }
+    $('#mpr-save').addEventListener('click', () => savePrice({
+      input: parseFloat($('#mpr-input').value) || 0,
+      output: parseFloat($('#mpr-output').value) || 0,
+      cache_write_5m: parseFloat($('#mpr-cw5').value) || 0,
+      cache_write_1h: parseFloat($('#mpr-cw1').value) || 0,
+      cache_read: parseFloat($('#mpr-cr').value) || 0,
+    }));
+    $('#mpr-clear').addEventListener('click', () => savePrice({ clear: true }));
 
     // =================================================
     // PROVIDERS
@@ -1797,6 +1833,7 @@
           selectedGroupId = null;
           $('#grp-detail-title').textContent = '选择一个分组';
           $('#grp-add-mapping').style.display = 'none';
+          $('#grp-passthrough-row').style.display = 'none';
           $('#mappings-table').innerHTML = '';
         }
       } catch (e) {
@@ -1823,7 +1860,7 @@
         item.addEventListener('click', (e) => {
           if (e.target.dataset.act === 'del-grp') {
             e.stopPropagation();
-            if (!confirm('删除分组？引用它的密钥将回落到「允许模型」。')) return;
+            if (!confirm('删除分组？引用它的密钥将回落到默认透传组。')) return;
             adminFetch('/admin/groups/' + id, { method: 'DELETE' }).then(fetchGroups).catch(e => alert('删除失败：' + e.message));
             return;
           }
@@ -1838,6 +1875,7 @@
       const g = groupsCache.find(x => x.id === groupId);
       $('#grp-detail-title').textContent = g ? ('分组：' + g.name) : '分组';
       $('#grp-add-mapping').style.display = '';
+      renderPassthroughRow(g);
       let list = [];
       try { list = await adminFetch('/admin/groups/' + groupId + '/mappings') || []; }
       catch (e) { $('#mappings-table').innerHTML = '<tbody><tr><td class="empty" colspan="5">' + escHTML(e.message) + '</td></tr></tbody>'; return; }
@@ -1880,6 +1918,29 @@
         });
       });
     }
+
+    // ---------- group passthrough ----------
+    function renderPassthroughRow(g) {
+      const row = $('#grp-passthrough-row');
+      const sel = $('#grp-passthrough');
+      if (!g) { row.style.display = 'none'; return; }
+      const opts = ['<option value="">— 无（仅放行已映射逻辑名）—</option>']
+        .concat(providersCache.filter(p => p.enabled).map(p =>
+          '<option value="' + p.id + '">' + escHTML(p.name) + ' (' + p.format + ')</option>'));
+      sel.innerHTML = opts.join('');
+      sel.value = g.passthrough_provider_id != null ? String(g.passthrough_provider_id) : '';
+      row.style.display = 'flex';
+    }
+    $('#grp-passthrough').addEventListener('change', async (e) => {
+      if (!selectedGroupId) return;
+      const v = e.target.value;
+      const body = v ? { passthrough_provider_id: parseInt(v, 10) } : { clear_passthrough: true };
+      try {
+        await adminFetch('/admin/groups/' + selectedGroupId, { method: 'PATCH', body });
+        const g = groupsCache.find(x => x.id === selectedGroupId);
+        if (g) g.passthrough_provider_id = v ? parseInt(v, 10) : null;
+      } catch (err) { alert('设置透传失败：' + err.message); }
+    });
 
     // ---------- mapping modal ----------
     $('#grp-add-mapping').addEventListener('click', () => openMappingModal());

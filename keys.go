@@ -1,9 +1,9 @@
 // keys.go: proxy key 元数据 + DB 操作
 //
 // 表设计见 storage.go 的 proxy_keys。
-// allowed_models 字段两种值：
-//   "*"          表示无限制（受 curated_models.enabled 约束）
-//   `["a","b"]`  JSON 数组，表示只允许这几个 model_id
+// 模型可见性由 key 绑定的小组（GroupID）决定——组即白名单。
+// allowed_models 字段已废弃（模型层合并后不再做 per-key 白名单），仅为兼容老 DB 保留，
+// 新建 key 一律写 "*"。
 //
 // 启动时把全表加载到 KeyCache（内存 map），请求路径 O(1) 查询。
 // CRUD 操作完后必须 keyCache.Reload() 刷新。
@@ -13,7 +13,6 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base32"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -22,38 +21,19 @@ import (
 
 type KeyMeta struct {
 	Key           string     `json:"key"`
-	Owner         string     `json:"owner"`        // 备注/标签（如"给谁用"），可改
-	Creator       string     `json:"creator"`      // 归属 = 创建者，钉死不可转让不可改
+	Owner         string     `json:"owner"`   // 备注/标签（如"给谁用"），可改
+	Creator       string     `json:"creator"` // 归属 = 创建者，钉死不可转让不可改
 	CreatedAt     time.Time  `json:"created_at"`
 	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
-	DailyBudget   float64    `json:"daily_budget"` // USD; 0 = unlimited
-	AllowedModels string     `json:"allowed_models"`
-	GroupID       *int64     `json:"group_id,omitempty"` // 绑定的小组；nil = 回落 allowed_models（旧行为）
+	DailyBudget   float64    `json:"daily_budget"`       // USD; 0 = unlimited
+	AllowedModels string     `json:"allowed_models"`     // 已废弃：保留列兼容老 DB，恒为 "*"
+	GroupID       *int64     `json:"group_id,omitempty"` // 绑定的小组 = 该 key 的模型白名单
 	Notes         string     `json:"notes"`
 }
 
 // IsActive returns true if the key has not been revoked.
 func (k *KeyMeta) IsActive() bool {
 	return k.RevokedAt == nil
-}
-
-// ModelAllowed 判断给定 model_id 是否在该 key 的白名单内。
-// 不检查 curated_models —— 那是另一层（这里只看 per-key 限制）。
-func (k *KeyMeta) ModelAllowed(modelID string) bool {
-	if k.AllowedModels == "" || k.AllowedModels == "*" {
-		return true
-	}
-	var list []string
-	if err := json.Unmarshal([]byte(k.AllowedModels), &list); err != nil {
-		// 解析失败按全允许，避免管理员误改 DB 把朋友全锁死
-		return true
-	}
-	for _, m := range list {
-		if m == modelID {
-			return true
-		}
-	}
-	return false
 }
 
 // ---------- DB 操作 ----------
@@ -130,6 +110,13 @@ func (s *Store) CreateKey(k *KeyMeta) error {
 	if k.CreatedAt.IsZero() {
 		k.CreatedAt = time.Now()
 	}
+	// 未指定小组 → 默认绑「默认透传组」，让新 key 也走统一的组路由
+	// （而非 group_id=NULL 的 legacy 分支）。默认组未就绪时退回 NULL。
+	if k.GroupID == nil && providerRegistry != nil {
+		if gid := providerRegistry.DefaultGroupID(); gid > 0 {
+			k.GroupID = &gid
+		}
+	}
 	_, err := s.db.Exec(
 		"INSERT INTO proxy_keys (key, owner, creator, created_at, daily_budget, allowed_models, group_id, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		k.Key, k.Owner, k.Creator, k.CreatedAt.UnixMilli(), k.DailyBudget, k.AllowedModels, k.GroupID, k.Notes)
@@ -138,12 +125,11 @@ func (s *Store) CreateKey(k *KeyMeta) error {
 
 // UpdateKey 部分更新：传 nil 表示该字段不动。
 type KeyUpdate struct {
-	Owner         *string  `json:"owner,omitempty"`
-	DailyBudget   *float64 `json:"daily_budget,omitempty"`
-	AllowedModels *string  `json:"allowed_models,omitempty"`
-	GroupID       *int64   `json:"group_id,omitempty"` // 见 ClearGroup：传 -1 表示解绑（置 NULL）
-	ClearGroup    bool     `json:"clear_group,omitempty"`
-	Notes         *string  `json:"notes,omitempty"`
+	Owner       *string  `json:"owner,omitempty"`
+	DailyBudget *float64 `json:"daily_budget,omitempty"`
+	GroupID     *int64   `json:"group_id,omitempty"` // 见 ClearGroup：解绑后回落默认透传组
+	ClearGroup  bool     `json:"clear_group,omitempty"`
+	Notes       *string  `json:"notes,omitempty"`
 }
 
 func (s *Store) UpdateKey(key string, u KeyUpdate) error {
@@ -156,10 +142,6 @@ func (s *Store) UpdateKey(key string, u KeyUpdate) error {
 	if u.DailyBudget != nil {
 		sets = append(sets, "daily_budget = ?")
 		args = append(args, *u.DailyBudget)
-	}
-	if u.AllowedModels != nil {
-		sets = append(sets, "allowed_models = ?")
-		args = append(args, *u.AllowedModels)
 	}
 	if u.ClearGroup {
 		sets = append(sets, "group_id = NULL")

@@ -1,6 +1,6 @@
 // providers.go: ProviderRegistry — 多上游服务商 + 小组映射的运行时缓存。
 //
-// 仿 KeyCache / ModelRegistry：DB 是真相源，这里持内存索引供路由热路径 O(1) 查询。
+// 仿 KeyCache：DB 是真相源，这里持内存索引供路由热路径 O(1) 查询。
 // 缓存两类东西：
 //  1. providers：id → *Provider（base_url / key / format / enabled）
 //  2. 小组映射的两个索引（给 routing.go 用）：
@@ -27,6 +27,9 @@ type ProviderRegistry struct {
 	byName     map[string]*Provider                // name → provider（给默认上游回落用，避免热路径查 DB）
 	byLogical  map[int64]map[string][]GroupMapping // gid → logical → 有序映射
 	byUpstream map[int64]map[string]GroupMapping   // gid → upstreamID → 映射（取第一条）
+	passthru   map[int64]int64                     // gid → 透传服务商 id（未命中显式映射时原样透传）
+	defGroupID int64                               // 名为 "default" 的组 id（新 key 默认绑定）
+	priceIdx   map[int64]map[string]Price          // providerID → upstreamID → 计价覆盖
 	store      *Store
 	client     *http.Client
 }
@@ -37,12 +40,14 @@ func NewProviderRegistry(s *Store) *ProviderRegistry {
 		byName:     map[string]*Provider{},
 		byLogical:  map[int64]map[string][]GroupMapping{},
 		byUpstream: map[int64]map[string]GroupMapping{},
+		passthru:   map[int64]int64{},
+		priceIdx:   map[int64]map[string]Price{},
 		store:      s,
 		client:     &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
-// Reload 从 DB 重建 providers 缓存 + 小组映射索引。
+// Reload 从 DB 重建 providers 缓存 + 小组映射索引 + 小组透传索引。
 func (r *ProviderRegistry) Reload() error {
 	provs, err := r.store.ListProviders()
 	if err != nil {
@@ -52,12 +57,50 @@ func (r *ProviderRegistry) Reload() error {
 	if err != nil {
 		return err
 	}
+	groups, err := r.store.ListGroups()
+	if err != nil {
+		return err
+	}
+	models, err := r.store.ListAllProviderModels()
+	if err != nil {
+		return err
+	}
 
 	provIdx := make(map[int64]*Provider, len(provs))
 	nameIdx := make(map[string]*Provider, len(provs))
 	for i := range provs {
 		provIdx[provs[i].ID] = &provs[i]
 		nameIdx[provs[i].Name] = &provs[i]
+	}
+
+	passthru := make(map[int64]int64, len(groups))
+	var defGroupID int64
+	for i := range groups {
+		if groups[i].PassthroughProviderID != nil {
+			passthru[groups[i].ID] = *groups[i].PassthroughProviderID
+		}
+		if groups[i].Name == defaultGroupName {
+			defGroupID = groups[i].ID
+		}
+	}
+
+	// 计价覆盖索引：有 price_input 的库存行视为已设覆盖（其余项 NULL → 0）。
+	priceIdx := map[int64]map[string]Price{}
+	for i := range models {
+		m := &models[i]
+		if m.PriceInput == nil {
+			continue
+		}
+		if priceIdx[m.ProviderID] == nil {
+			priceIdx[m.ProviderID] = map[string]Price{}
+		}
+		priceIdx[m.ProviderID][m.UpstreamID] = Price{
+			Input:        derefFloat(m.PriceInput),
+			Output:       derefFloat(m.PriceOutput),
+			CacheWrite5m: derefFloat(m.PriceCacheWrite5m),
+			CacheWrite1h: derefFloat(m.PriceCacheWrite1h),
+			CacheRead:    derefFloat(m.PriceCacheRead),
+		}
 	}
 
 	byLogical := map[int64]map[string][]GroupMapping{}
@@ -96,8 +139,18 @@ func (r *ProviderRegistry) Reload() error {
 	r.byName = nameIdx
 	r.byLogical = byLogical
 	r.byUpstream = byUpstream
+	r.passthru = passthru
+	r.defGroupID = defGroupID
+	r.priceIdx = priceIdx
 	r.mu.Unlock()
 	return nil
+}
+
+func derefFloat(p *float64) float64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // Provider 按 id 取服务商。
@@ -152,6 +205,43 @@ func (r *ProviderRegistry) MappingByUpstream(groupID int64, upstreamID string) (
 	return m, ok
 }
 
+// PassthroughProvider 返回某小组的透传服务商（设了且仍启用才返回）。
+// 命中时：组内未显式映射的模型，原样透传给它（复刻旧 group_id=NULL 行为）。
+func (r *ProviderRegistry) PassthroughProvider(groupID int64) (*Provider, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	pid, ok := r.passthru[groupID]
+	if !ok {
+		return nil, false
+	}
+	p, ok := r.providers[pid]
+	if !ok || !p.Enabled {
+		return nil, false
+	}
+	return p, true
+}
+
+// DefaultGroupID 返回名为 "default" 的组 id（新 key 未指定组时默认绑定）。
+// 返回 0 表示默认组尚未建立。
+func (r *ProviderRegistry) DefaultGroupID() int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.defGroupID
+}
+
+// PriceFor 返回某 (服务商名, 上游真实模型名) 的计价覆盖。
+// ok=false 表示没设覆盖 → 调用方应回落静态 Anthropic 价表。
+func (r *ProviderRegistry) PriceFor(providerName, upstreamModel string) (Price, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p, ok := r.byName[providerName]
+	if !ok {
+		return Price{}, false
+	}
+	pr, ok := r.priceIdx[p.ID][upstreamModel]
+	return pr, ok
+}
+
 // LogicalNames 返回某小组对外暴露的全部逻辑名（给 /v1/models 列表用）。
 func (r *ProviderRegistry) LogicalNames(groupID int64) []string {
 	r.mu.RLock()
@@ -160,6 +250,33 @@ func (r *ProviderRegistry) LogicalNames(groupID int64) []string {
 	out := make([]string, 0, len(byLog))
 	for name := range byLog {
 		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// GroupModelIDs 返回某小组对外可用的全部模型名：显式映射的逻辑名 ∪
+// （若设了透传服务商）该服务商的全部库存真实名。给统一的 /v1/models 列表用，
+// 取代旧的 curated_models 列表。透传组（如默认组）没有显式映射时，
+// 列表即等于透传服务商的库存——复刻旧 curated_models 的呈现。
+func (r *ProviderRegistry) GroupModelIDs(groupID int64) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, n := range r.LogicalNames(groupID) {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	if p, ok := r.PassthroughProvider(groupID); ok && r.store != nil {
+		if models, err := r.store.ListProviderModels(p.ID); err == nil {
+			for _, m := range models {
+				if !seen[m.UpstreamID] {
+					seen[m.UpstreamID] = true
+					out = append(out, m.UpstreamID)
+				}
+			}
+		}
 	}
 	sort.Strings(out)
 	return out

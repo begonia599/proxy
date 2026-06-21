@@ -15,7 +15,7 @@
 //   proxy.go   反向代理装配 + 转发 / v1/models 拦截 handler
 //   admin.go   /admin/* JSON API
 //   keys.go    proxy key 缓存
-//   models.go  模型注册表 + 30 分钟刷新
+//   routing.go 下游模型名 → 上游服务商/真实名解析（小组路由 + 透传）
 //   pricing.go 各模型 token 单价
 //   storage.go SQLite 持久化层
 package main
@@ -41,7 +41,6 @@ const (
 var (
 	store            *Store
 	keys             *KeyCache
-	modelRegistry    *ModelRegistry
 	providerRegistry *ProviderRegistry
 )
 
@@ -76,21 +75,18 @@ func main() {
 	if err := providerRegistry.Reload(); err != nil {
 		log.Fatalf("load providers: %v", err)
 	}
+	// 模型层合并：建「默认透传组」并把未绑组的旧 key 迁移进去（复刻 group_id=NULL 语义），
+	// 然后重载注册表与 key 缓存让路由热路径感知。
+	ensureDefaultGroup(store)
+	if err := providerRegistry.Reload(); err != nil {
+		log.Fatalf("reload providers after default group: %v", err)
+	}
+	if err := keys.Reload(); err != nil {
+		log.Fatalf("reload keys after default group: %v", err)
+	}
 	// 启动时刷新一次各服务商模型库存（失败不阻止启动）。
 	go providerRegistry.RefreshAll()
 	providerRegistry.RunPeriodic(30 * time.Minute)
-
-	// 旧模型注册表保留：/v1/models 在 key 未绑小组时回落到它（fail-open）。
-	modelRegistry = NewModelRegistry(store)
-	if err := modelRegistry.ReloadFromDB(); err != nil {
-		log.Printf("model registry initial DB load failed: %v", err)
-	}
-	if k := cfg.GetRealKey(); k != "" {
-		if err := modelRegistry.Refresh(k); err != nil {
-			log.Printf("initial model registry load failed: %v (fail-open, will retry in 30m)", err)
-		}
-	}
-	modelRegistry.RunPeriodic(cfg.GetRealKey, 30*time.Minute)
 
 	rp := buildReverseProxy(cfg)
 
@@ -106,7 +102,6 @@ func main() {
 	mux.HandleFunc("/admin/keys", adminKeysHandler(cfg))
 	mux.HandleFunc("/admin/keys/", adminKeysHandler(cfg))
 	mux.HandleFunc("/admin/models", adminModelsHandler(cfg))
-	mux.HandleFunc("/admin/models/", adminModelsHandler(cfg))
 	mux.HandleFunc("/admin/logs", adminLogsHandler(cfg))
 	mux.HandleFunc("/admin/logs/", adminLogsHandler(cfg))
 	mux.HandleFunc("/admin/timeseries", adminTimeseriesHandler(cfg))

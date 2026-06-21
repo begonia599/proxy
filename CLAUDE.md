@@ -12,11 +12,11 @@ cp .env.example .env           # fill in key= and admin_token=
 
 Go 1.21+ required. Only direct dependency: `modernc.org/sqlite` (pure Go, no CGO).
 
-No tests exist yet. No Makefile, no CI, no linter config.
+Tests: `go test ./...` (routing, passthrough/default-group migration, per-provider pricing, OpenAI-compat conversion, model rewrite). No Makefile, no CI, no linter config.
 
 ## Architecture
 
-Single-process Anthropic Messages API transparent proxy. All Go files are `package main` in the repo root. Three global singletons (`store`, `keys`, `modelRegistry`) are initialized in `main.go` and shared across handlers.
+Single-process Anthropic Messages API transparent proxy. All Go files are `package main` in the repo root. Three global singletons (`store`, `keys`, `providerRegistry`) are initialized in `main.go` and shared across handlers.
 
 ### Request flow (POST /v1/chat/completions — OpenAI compat)
 
@@ -57,45 +57,46 @@ forwardHandler (proxy.go)
 
 | File | Role |
 |---|---|
-| `main.go` | Entry point, mux wiring, embeds `dashboard.html` via `go:embed`, legacy-key migration + registry init |
+| `main.go` | Entry point, mux wiring, embeds `dashboard.html` via `go:embed`, legacy-key migration + default-group migration + registry init |
 | `config.go` | `.env` parser → `Config{RealKey, AdminToken, HideCC}` (RealKey now only the legacy default upstream) |
 | `proxy.go` | Reverse proxy assembly, route-aware Director, `forwardHandler`, model list handlers, `rewriteTopLevelModel` (surgical model byte-rewrite) |
-| `keys.go` | `KeyMeta` + `KeyCache` (sync.RWMutex map backed by SQLite), CRUD, key gen; `GroupID` binds a key to a group |
-| `routing.go` | `ResolveRoute(key, model) → RouteTarget` — the multi-provider routing core (logical name → primary mapping → upstream-name fallback → legacy default provider) |
-| `providers.go` | `ProviderRegistry` — in-memory providers + group-mapping indexes (byLogical/byUpstream), 30-min model-inventory refresh |
-| `providers_store.go` | DB types + CRUD for providers / provider_models / groups / group_mappings; `migrateLegacyKeyToProvider` |
+| `keys.go` | `KeyMeta` + `KeyCache` (sync.RWMutex map backed by SQLite), CRUD, key gen; `GroupID` binds a key to a group (its model allowlist); new keys default to the `default` group |
+| `routing.go` | `ResolveRoute(key, model) → RouteTarget` — the routing core. Every key resolves via its **effective group** (`effectiveGroupID`: own group, else default): logical name → primary mapping → upstream-name fallback → group passthrough provider |
+| `providers.go` | `ProviderRegistry` — in-memory providers + group-mapping indexes (byLogical/byUpstream) + passthrough index + per-(provider,model) price index, 30-min model-inventory refresh |
+| `providers_store.go` | DB types + CRUD for providers / provider_models (w/ price cols) / groups (w/ `passthrough_provider_id`) / group_mappings; `migrateLegacyKeyToProvider`, `ensureDefaultGroup` |
 | `dispatch.go` | Outbound dispatch: `callUpstreamAnthropic` always returns Anthropic-canonical (translates for openai-format providers); `dispatchAnthropicToOpenAI` |
-| `models.go` | `ModelRegistry` — fallback for keys with no group (curated ∩ allowlist) |
-| `pricing.go` | Static price table, exact match then family-prefix fallback, `CostOf()` |
+| `pricing.go` | Static price table (`CostOf`/`lookupPrice`) + `Price.Cost`; `tokenCost` resolves per-provider override (`ProviderRegistry.PriceFor`) → static fallback → 0 |
 | `storage.go` | SQLite schema (WAL mode), all request/stats/log DB ops |
-| `admin.go` | `/admin/*` JSON API (stats, keys CRUD w/ group_id, model toggle, logs, config) |
-| `admin_providers.go` | `/admin/providers` + `/admin/groups` (+ mappings) CRUD handlers |
+| `admin.go` | `/admin/*` JSON API (stats, keys CRUD w/ group_id, logs; `GET /admin/models` = unified cross-provider inventory + prices) |
+| `admin_providers.go` | `/admin/providers` (+ model price set) + `/admin/groups` (+ mappings, + group passthrough) CRUD handlers |
 | `usage.go` | `UsageRecord` (now w/ Provider, UpstreamModel), JSON + SSE response parsing, `writeRecord` |
 | `tee.go` | `teeBody` — wraps io.ReadCloser, copies up to 4MB to buffer, fires async callback on EOF |
 | `compat.go` | OpenAI Chat Completions inbound handler — routes via `ResolveRoute` + `callUpstreamAnthropic` |
 | `compat_convert.go` | Inbound conversion: OpenAI → Anthropic (request) and Anthropic → OpenAI (response/SSE) |
 | `compat_convert_out.go` | Outbound conversion: Anthropic → OpenAI (request) and OpenAI → Anthropic (response/SSE) |
-| `dashboard.html` | Single-file SPA (Chinese UI): overview/keys/providers/groups/models/logs/config tabs |
+| `dashboard.html` | Single-file SPA (Chinese UI): overview/keys/providers/groups/models(inventory+pricing)/logs tabs |
 
-### Multi-provider routing
+### Routing (group-based, single source of truth)
 
 ```
 ResolveRoute(keyMeta, requestedModel):
-  key bound to group (GroupID != nil):
-    logical name hit → primary mapping for that name
-    else upstream_id match → concrete-name fallback (existing clients unchanged)
-    else → 404 not_found
-  no group (legacy key):
-    → default provider (anthropic-official), model passed through unchanged
+  gid = effectiveGroupID(key)   # key's own GroupID, else the default group
+  logical name hit  → primary mapping for that name
+  else upstream_id match → concrete-name fallback (existing clients unchanged)
+  else group has passthrough provider → model passed through unchanged to it
+  else → 404 not_found
 ```
+
+The legacy `ModelRegistry` / `curated_models` / per-key `allowed_models` layer has been **retired** — the provider→group→mapping system is the single source of truth. A startup-created **default passthrough group** (→ `anthropic-official`) reproduces the old `group_id = NULL` behavior; `ensureDefaultGroup` migrates pre-existing keys into it.
 
 - **Canonical form = Anthropic Messages.** Inbound adapter (compat_convert.go) and outbound adapter (compat_convert_out.go) sandwich a single internal format, so all 4 client×provider combos reuse the same pipeline.
 - **Anthropic→Anthropic fast path** stays byte-level via ReverseProxy; logical→concrete model rename uses `rewriteTopLevelModel` (surgical splice, no re-marshal) to preserve prompt-cache bytes.
 - **No auto-failover.** Routing picks the current primary; upstream errors pass straight through to the downstream client.
+- **Pricing** is keyed on `(provider, upstream_model)` with an optional per-model override (`provider_models.price_*`), falling back to the static Anthropic family table; this fixes $0-cost for non-Anthropic upstreams.
 
 ### Database
 
-SQLite with WAL mode. Tables: `requests` (audit log, + `provider`/`upstream_model` cols), `proxy_keys` (+ `group_id`), `curated_models`, `error_bodies`, plus multi-provider: `providers`, `provider_models` (auto-discovered inventory), `groups`, `group_mappings` (logical-name → provider+upstream, one-to-many w/ `is_primary`). All timestamps unix milliseconds. No migration framework — `CREATE TABLE IF NOT EXISTS` + manual `ALTER TABLE` with duplicate-column error swallowing.
+SQLite with WAL mode. Tables: `requests` (audit log, + `provider`/`upstream_model` cols), `proxy_keys` (+ `group_id`; `allowed_models` retained but unused), `error_bodies`, plus the provider system: `providers`, `provider_models` (auto-discovered inventory + nullable `price_*` override cols), `groups` (+ `passthrough_provider_id`), `group_mappings` (logical-name → provider+upstream, one-to-many w/ `is_primary`). `curated_models` table is retained but no longer read (legacy). All timestamps unix milliseconds. No migration framework — `CREATE TABLE IF NOT EXISTS` + manual `ALTER TABLE` with duplicate-column error swallowing.
 
 ### Error response format
 
@@ -103,7 +104,7 @@ Proxy endpoints return Anthropic-compatible error JSON (`{"type":"error","error"
 
 ### Concurrency
 
-`KeyCache` and `ModelRegistry` use `sync.RWMutex`. `teeBody` uses `sync.Once` for its callback. SQLite WAL allows concurrent reads during writes.
+`KeyCache` and `ProviderRegistry` use `sync.RWMutex`. `teeBody` uses `sync.Once` for its callback. SQLite WAL allows concurrent reads during writes.
 
 ## Conventions
 

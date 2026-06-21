@@ -18,10 +18,10 @@ type Price struct {
 }
 
 var (
-	priceOpusNew = Price{5.0, 25.0, 6.25, 10.0, 0.50}  // Opus 4.5 / 4.6 / 4.7
+	priceOpusNew = Price{5.0, 25.0, 6.25, 10.0, 0.50}   // Opus 4.5 / 4.6 / 4.7
 	priceOpusOld = Price{15.0, 75.0, 18.75, 30.0, 1.50} // Opus 4 / 4.1
-	priceSonnet  = Price{3.0, 15.0, 3.75, 6.0, 0.30}   // Sonnet 4 / 4.5 / 4.6
-	priceHaiku45 = Price{1.0, 5.0, 1.25, 2.0, 0.10}    // Haiku 4.5
+	priceSonnet  = Price{3.0, 15.0, 3.75, 6.0, 0.30}    // Sonnet 4 / 4.5 / 4.6
+	priceHaiku45 = Price{1.0, 5.0, 1.25, 2.0, 0.10}     // Haiku 4.5
 )
 
 var priceTable = map[string]Price{
@@ -62,18 +62,36 @@ func lookupPrice(model string) (Price, bool) {
 	return Price{}, false
 }
 
-// CostOf 按 token 用量算 USD。
-func CostOf(model string, input, output, cacheCreate5m, cacheCreate1h, cacheRead int) float64 {
-	p, ok := lookupPrice(model)
-	if !ok {
-		return 0
-	}
+// Cost 按 token 用量算 USD（单价单位 USD / 1M tokens）。
+func (p Price) Cost(input, output, cacheCreate5m, cacheCreate1h, cacheRead int) float64 {
 	const M = 1_000_000.0
 	return (float64(input)*p.Input +
 		float64(output)*p.Output +
 		float64(cacheCreate5m)*p.CacheWrite5m +
 		float64(cacheCreate1h)*p.CacheWrite1h +
 		float64(cacheRead)*p.CacheRead) / M
+}
+
+// CostOf 按静态价表算 USD（未知模型 → 0）。
+func CostOf(model string, input, output, cacheCreate5m, cacheCreate1h, cacheRead int) float64 {
+	p, ok := lookupPrice(model)
+	if !ok {
+		return 0
+	}
+	return p.Cost(input, output, cacheCreate5m, cacheCreate1h, cacheRead)
+}
+
+// tokenCost 算 token 成本，解析顺序：
+//  1. 该服务商对该上游模型设的计价覆盖（修复非 Anthropic 上游被记 $0）
+//  2. 静态 Anthropic 家族价表（按真实模型名匹配）
+//  3. 都没有 → 0
+func tokenCost(providerName, model string, input, output, cacheCreate5m, cacheCreate1h, cacheRead int) float64 {
+	if providerRegistry != nil {
+		if p, ok := providerRegistry.PriceFor(providerName, model); ok {
+			return p.Cost(input, output, cacheCreate5m, cacheCreate1h, cacheRead)
+		}
+	}
+	return CostOf(model, input, output, cacheCreate5m, cacheCreate1h, cacheRead)
 }
 
 // Web search 工具：$10 / 1000 次搜索，与模型无关。

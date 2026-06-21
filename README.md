@@ -4,9 +4,9 @@
 
 - **字节级原样转发**:请求/响应 body 不重序列化,保证 prompt cache 正常命中
 - **多代理 key + 单上游 key**:用 `sk-proxy-` 前缀的虚拟 key 分发给不同消费者,统一回真实 Anthropic key
-- **每 key 独立策略**:每日预算上限、可用模型白名单、备注、随时吊销
-- **模型 curation**:从上游拉模型列表,管理员可单独 enable/disable,未知/禁用模型直接 404 不浪费上游一跳
-- **成本核算**:按模型最新单价 + 5m/1h ephemeral cache + web_search 次数实时计算 USD
+- **每 key 独立策略**:每日预算上限、绑定一个分组作为可用模型白名单、备注、随时吊销
+- **多服务商 + 分组映射**:接入多家上游(服务商),自动发现其模型库存(大组),在分组里把库存映射成对外逻辑名;分组可设「透传服务商」整家放行。proxy key 绑定一个分组
+- **成本核算**:按服务商-模型计价(可逐模型覆盖,缺省回落静态 Anthropic 价表) + 5m/1h ephemeral cache + web_search 次数实时计算 USD
 - **完整审计日志**:每条请求都记录到 SQLite,非 2xx 状态额外保存请求/响应 body 快照(单边截断到 256KB)
 - **管理面板**:`/admin/` 提供概览(9 卡 + 5 线折线图)、密钥管理、模型 curation、日志侧抽屉
 
@@ -71,8 +71,9 @@ admin token: <your token>
 
 浏览器访问 `http://127.0.0.1:8787/admin/`,在前端粘贴你的 admin token 登录,然后:
 
-- **密钥**页 → "新建密钥",填 owner / 每日预算 / 允许的模型,生成 `sk-proxy-xxxxxxxx` 给消费者
-- **模型**页 → 按需禁用不想暴露的模型
+- **密钥**页 → "新建密钥",填 owner / 每日预算 / 绑定分组,生成 `sk-proxy-xxxxxxxx` 给消费者
+- **服务商**页 → 接入上游、刷新模型库存;**分组**页 → 把库存映射成逻辑名或设透传服务商
+- **模型**页 → 给各服务商模型设按服务商的计价覆盖
 - **日志**页 → 看每条请求详情,非 2xx 可在抽屉里查看完整 body
 - **概览**页 → 折线图看 token / 缓存 / 成本趋势
 
@@ -112,11 +113,13 @@ curl http://127.0.0.1:8787/v1/messages \
 | `GET  /admin/stats?since=&until=&proxy_key=&model=` | 总览统计(总数 + 按 key/model/天分组) |
 | `GET  /admin/timeseries?granularity=hour\|day&...` | 时序桶,给折线图用 |
 | `GET  /admin/keys` | 列出所有 proxy key |
-| `POST /admin/keys` | 新建 key(body: `{owner, daily_budget, allowed_models, notes}`) |
-| `PATCH /admin/keys/<key>` | 修改 owner/预算/白名单/备注 |
+| `POST /admin/keys` | 新建 key(body: `{owner, daily_budget, group_id, notes}`) |
+| `PATCH /admin/keys/<key>` | 修改 owner/预算/绑定分组/备注 |
 | `DELETE /admin/keys/<key>` | 吊销 |
-| `GET  /admin/models` | 列出 curated 模型 |
-| `PATCH /admin/models/<id>` | 开关启用状态(body: `{"enabled": true/false}`) |
+| `GET  /admin/models` | 列出各服务商大组库存(含按服务商计价覆盖) |
+| `POST /admin/providers/<id>/models/<upstream>/price` | 设/清某模型计价覆盖(body: `{input,output,cache_write_5m,cache_write_1h,cache_read}` 或 `{"clear":true}`) |
+| `GET/POST/PATCH/DELETE /admin/providers[/<id>...]` | 服务商 CRUD + `/refresh` 拉库存 + `/models` 列库存 |
+| `GET/POST/PATCH/DELETE /admin/groups[/<id>/mappings...]` | 分组 + 逻辑名映射 CRUD;分组 PATCH 可设 `passthrough_provider_id` |
 | `GET  /admin/logs?proxy_key=&model=&status=&since=&until=&before_id=&limit=` | 请求日志列表,游标分页 |
 | `GET  /admin/logs/<id>` | 单条日志详情(含 4xx/5xx 时的请求/响应 body) |
 
@@ -144,8 +147,9 @@ api.anthropic.com
 
 - `main.go` 反向代理 + admin 路由
 - `keys.go` proxy key 缓存
-- `models.go` 模型注册表 + 每 30 分钟从上游刷新
-- `pricing.go` 各模型 token 单价 + web_search 单价
+- `routing.go` 下游模型名 → 上游服务商/真实名解析(分组路由 + 透传)
+- `providers.go` / `providers_store.go` 服务商 + 分组映射注册表与持久化
+- `pricing.go` 静态价表 + 按服务商计价覆盖 + web_search 单价
 - `storage.go` SQLite 持久化层(schema、查询、日志、时序)
 - `dashboard.html` 单文件管理面板,go:embed
 
