@@ -17,22 +17,67 @@ import (
 
 // providerView 是 Provider 的对外视图：脱敏 key + has_key 标记。
 type providerView struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	BaseURL   string `json:"base_url"`
-	Format    string `json:"format"`
-	Enabled   bool   `json:"enabled"`
-	HasKey    bool   `json:"has_key"`
-	MaskedKey string `json:"masked_key"`
-	CreatedAt int64  `json:"created_at"`
+	ID                        int64  `json:"id"`
+	Name                      string `json:"name"`
+	BaseURL                   string `json:"base_url"`
+	OpenAIBaseURL             string `json:"openai_base_url"`
+	AnthropicBaseURL          string `json:"anthropic_base_url"`
+	Format                    string `json:"format"`
+	Enabled                   bool   `json:"enabled"`
+	HasKey                    bool   `json:"has_key"`
+	MaskedKey                 string `json:"masked_key"`
+	RequestOverrides          string `json:"request_overrides"`
+	RequestOverridesIsDefault bool   `json:"request_overrides_is_default"`
+	CreatedAt                 int64  `json:"created_at"`
 }
 
 func toProviderView(p *Provider) providerView {
+	requestOverrides := ""
+	if p.RequestOverrides != nil {
+		requestOverrides = *p.RequestOverrides
+	}
 	return providerView{
-		ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, Format: p.Format,
+		ID: p.ID, Name: p.Name, BaseURL: p.BaseURL, OpenAIBaseURL: p.OpenAIBaseURL, AnthropicBaseURL: p.AnthropicBaseURL, Format: p.Format,
 		Enabled: p.Enabled, HasKey: p.APIKey != "", MaskedKey: MaskKey(p.APIKey),
+		RequestOverrides: requestOverrides, RequestOverridesIsDefault: p.RequestOverrides == nil,
 		CreatedAt: p.CreatedAt.UnixMilli(),
 	}
+}
+
+type providerModelView struct {
+	ProviderModel
+	EffectivePrice       *Price `json:"effective_price,omitempty"`
+	EffectivePriceSource string `json:"effective_price_source"`
+}
+
+func toProviderModelView(provider *Provider, m ProviderModel) providerModelView {
+	v := providerModelView{ProviderModel: m, EffectivePriceSource: "none"}
+	if m.PriceInput != nil {
+		v.EffectivePrice = &Price{
+			Input:        derefFloat(m.PriceInput),
+			Output:       derefFloat(m.PriceOutput),
+			CacheWrite5m: derefFloat(m.PriceCacheWrite5m),
+			CacheWrite1h: derefFloat(m.PriceCacheWrite1h),
+			CacheRead:    derefFloat(m.PriceCacheRead),
+		}
+		v.EffectivePriceSource = "override"
+		return v
+	}
+	if providerSupportsAnthropic(provider) && !providerSupportsOpenAI(provider) {
+		if p, ok := lookupPrice(m.UpstreamID); ok {
+			v.EffectivePrice = &p
+			v.EffectivePriceSource = "default"
+		}
+	}
+	return v
+}
+
+func toProviderModelViews(provider *Provider, models []ProviderModel) []providerModelView {
+	out := make([]providerModelView, 0, len(models))
+	for _, m := range models {
+		out = append(out, toProviderModelView(provider, m))
+	}
+	return out
 }
 
 // adminProvidersHandler 处理 /admin/providers 与 /admin/providers/{id}[/...]：
@@ -77,11 +122,14 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 
 		case r.Method == http.MethodPost && idPart == "":
 			var req struct {
-				Name    string `json:"name"`
-				BaseURL string `json:"base_url"`
-				APIKey  string `json:"api_key"`
-				Format  string `json:"format"`
-				Enabled *bool  `json:"enabled"`
+				Name             string  `json:"name"`
+				BaseURL          string  `json:"base_url"`
+				OpenAIBaseURL    string  `json:"openai_base_url"`
+				AnthropicBaseURL string  `json:"anthropic_base_url"`
+				APIKey           string  `json:"api_key"`
+				Format           string  `json:"format"`
+				Enabled          *bool   `json:"enabled"`
+				RequestOverrides *string `json:"request_overrides"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
@@ -92,17 +140,26 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 				return
 			}
 			if req.Format == "" {
-				req.Format = "anthropic"
+				req.Format = providerFormatAnthropic
 			}
-			if req.Format != "anthropic" && req.Format != "openai" {
-				http.Error(w, `{"error":"format must be anthropic or openai"}`, http.StatusBadRequest)
+			if !validProviderFormat(req.Format) {
+				http.Error(w, `{"error":"format must be anthropic, openai, or hybrid"}`, http.StatusBadRequest)
 				return
+			}
+			if req.RequestOverrides != nil {
+				if err := validateRequestOverrides(*req.RequestOverrides); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+					return
+				}
 			}
 			enabled := true
 			if req.Enabled != nil {
 				enabled = *req.Enabled
 			}
-			p := &Provider{Name: req.Name, BaseURL: req.BaseURL, APIKey: req.APIKey, Format: req.Format, Enabled: enabled}
+			p := &Provider{
+				Name: req.Name, BaseURL: req.BaseURL, OpenAIBaseURL: req.OpenAIBaseURL, AnthropicBaseURL: req.AnthropicBaseURL,
+				APIKey: req.APIKey, Format: req.Format, Enabled: enabled, RequestOverrides: req.RequestOverrides,
+			}
 			id, err := store.CreateProvider(p)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
@@ -124,10 +181,38 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
 				return
 			}
-			if u.Format != nil && *u.Format != "anthropic" && *u.Format != "openai" {
-				http.Error(w, `{"error":"format must be anthropic or openai"}`, http.StatusBadRequest)
+			if u.Format != nil && !validProviderFormat(*u.Format) {
+				http.Error(w, `{"error":"format must be anthropic, openai, or hybrid"}`, http.StatusBadRequest)
 				return
 			}
+			if u.RequestOverrides != nil {
+				if err := validateRequestOverrides(*u.RequestOverrides); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
+					return
+				}
+			}
+			current, err := store.GetProvider(id)
+			if err != nil {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			merged := *current
+			if u.BaseURL != nil {
+				merged.BaseURL = *u.BaseURL
+			}
+			if u.OpenAIBaseURL != nil {
+				merged.OpenAIBaseURL = *u.OpenAIBaseURL
+			}
+			if u.AnthropicBaseURL != nil {
+				merged.AnthropicBaseURL = *u.AnthropicBaseURL
+			}
+			if u.Format != nil {
+				merged.Format = *u.Format
+			}
+			normalizeProviderURLs(&merged)
+			u.BaseURL = &merged.BaseURL
+			u.OpenAIBaseURL = &merged.OpenAIBaseURL
+			u.AnthropicBaseURL = &merged.AnthropicBaseURL
 			if err := store.UpdateProvider(id, u); err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusNotFound)
 				return
@@ -173,6 +258,11 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 			if !ok {
 				return
 			}
+			p, err := store.GetProvider(id)
+			if err != nil {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
 			models, err := store.ListProviderModels(id)
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
@@ -181,7 +271,7 @@ func adminProvidersHandler(cfg *Config) http.HandlerFunc {
 			if models == nil {
 				models = []ProviderModel{}
 			}
-			_ = json.NewEncoder(w).Encode(models)
+			_ = json.NewEncoder(w).Encode(toProviderModelViews(p, models))
 
 		// POST /admin/providers/{id}/models —— 批量把选中的上游模型加入大组。
 		case r.Method == http.MethodPost && sub == "models":

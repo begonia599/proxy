@@ -262,6 +262,29 @@
   }
   .field .apply:hover, .btn:hover { background: var(--hero); }
   .field .apply:active, .btn:active { transform: translateY(1px); }
+  .filter-tools {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin: -32px 0 42px; color: var(--fg-dim); font-size: 10px;
+    letter-spacing: 0.06em;
+  }
+  .filter-tools button {
+    background: transparent; color: var(--fg-dim); border: 1px solid var(--line);
+    padding: 5px 10px; font: inherit; font-size: 10px; cursor: pointer;
+  }
+  .filter-tools button:hover, .filter-tools button.active {
+    color: var(--hero); border-color: var(--hero);
+  }
+  .filter-tools .summary { margin-left: auto; }
+  .logs-pager {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    margin-top: 24px; color: var(--fg-dim); font-size: 10px; letter-spacing: 0.08em;
+  }
+  .logs-pager .state {
+    min-width: 160px; text-align: center; color: var(--fg-sub);
+  }
+  .logs-pager .btn[disabled] {
+    opacity: 0.42; cursor: not-allowed; transform: none; box-shadow: none;
+  }
   .btn.ghost {
     background: transparent; color: var(--fg-dim);
     border: 1px solid var(--line);
@@ -347,6 +370,56 @@
   .metric .value.error   { color: var(--error); }
   .metric .value.zero    { color: var(--fg-sub); }
   .metric .value.search  { color: var(--coral); }
+
+  .totals.has-12 .metric:nth-child(n+7) { border-bottom: 1px solid var(--line); }
+  .totals.has-12 .metric:nth-child(n+10) { border-bottom: none; }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr;
+    gap: 28px;
+    margin: -24px 0 56px;
+  }
+  .summary-card {
+    border: 1px solid var(--line);
+    background: rgba(21,19,13,0.34);
+    padding: 18px 20px 16px;
+  }
+  .summary-card .title {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 14px;
+  }
+  .summary-card .title b {
+    font-size: 11px; letter-spacing: 0.18em; font-weight: 500;
+    color: var(--fg);
+  }
+  .summary-card .title span {
+    font-family: 'Instrument Serif', 'Noto Serif SC', serif;
+    font-style: italic; font-size: 18px; color: var(--fg-dim);
+  }
+  .summary-items {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 18px;
+  }
+  .summary-item { min-width: 0; }
+  .summary-item .k {
+    font-size: 10px; letter-spacing: 0.08em; color: var(--fg-dim);
+    margin-bottom: 2px;
+  }
+  .summary-item .v {
+    font-size: 14px; color: var(--fg); font-variant-numeric: tabular-nums;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .summary-item .v.cost { color: var(--accent); }
+  .summary-item .v.warn { color: var(--coral); }
+  .summary-item .v.ok { color: var(--hero); }
+  .policy-list { display: grid; gap: 8px; }
+  .policy-line {
+    display: grid; grid-template-columns: auto 1fr; gap: 10px;
+    align-items: baseline; font-size: 12px; color: var(--fg-dim);
+  }
+  .policy-line .mark { color: var(--hero); font-size: 11px; letter-spacing: 0.08em; }
+  .policy-line .dim { color: var(--fg-sub); }
 
   /* -------- sections -------- */
   .section { margin-bottom: 56px; }
@@ -453,6 +526,102 @@
   .bar { height: 100%; background: var(--accent); opacity: 0.7; transition: width 480ms cubic-bezier(0.2,0.8,0.2,1); }
 
   .breakdowns { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; }
+
+  /* -------- groups -------- */
+  .groups-layout {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+  .grp-item {
+    position: relative;
+    padding: 11px 12px;
+    border: 1px solid var(--line);
+    margin-bottom: 8px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    background: rgba(21,19,13,0.22);
+    transition: border-color 140ms, background 140ms, box-shadow 140ms;
+  }
+  .grp-item::before {
+    content: '';
+    position: absolute;
+    left: -1px; top: 8px; bottom: 8px;
+    width: 2px;
+    background: transparent;
+    transition: background 140ms, box-shadow 140ms;
+  }
+  .grp-item:hover {
+    border-color: var(--line-bright);
+    background: rgba(232,176,74,0.035);
+  }
+  .grp-item.active {
+    border-color: rgba(95,180,164,0.46);
+    background: linear-gradient(90deg, rgba(95,180,164,0.10), rgba(21,19,13,0.24));
+    box-shadow: inset 0 0 0 1px rgba(95,180,164,0.04);
+  }
+  .grp-item.active::before {
+    background: var(--hero);
+    box-shadow: 0 0 10px rgba(95,180,164,0.42);
+  }
+  .grp-item .name {
+    color: var(--fg);
+    font-size: 12px;
+    letter-spacing: 0.03em;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .grp-item.active .name { color: var(--hero); }
+  .grp-item .btn { opacity: 0.62; }
+  .grp-item:hover .btn { opacity: 1; }
+  .passthrough-card {
+    display: none;
+    grid-template-columns: auto minmax(180px, 260px) 1fr;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 18px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    background: rgba(21,19,13,0.34);
+  }
+  .passthrough-card .label {
+    font-size: 11px;
+    color: var(--fg-dim);
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+  }
+  .passthrough-card select {
+    width: 100%;
+    background-color: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--line);
+    padding: 7px 28px 7px 10px;
+    font: inherit;
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg width='8' height='5' viewBox='0 0 8 5' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M0 0 L4 5 L8 0' stroke='%238c8569' fill='none'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+  }
+  .passthrough-card select:focus {
+    outline: none;
+    border-color: var(--hero);
+    box-shadow: 0 0 0 3px rgba(95,180,164,0.08);
+  }
+  .passthrough-card select option { background: var(--bg); color: var(--fg); }
+  .passthrough-card .hint {
+    font-size: 10px;
+    color: var(--fg-sub);
+    min-width: 180px;
+    line-height: 1.5;
+  }
 
   /* -------- redaction -------- */
   .redact {
@@ -624,6 +793,115 @@
     to   { opacity: 1; transform: translateY(0); }
   }
 
+  /* -------- quiet motion layer -------- */
+  .view.active {
+    animation: view-in 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  @keyframes view-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .metric,
+  .summary-card,
+  .chart-wrap,
+  .passthrough-card,
+  .login-card {
+    transition:
+      border-color 180ms ease,
+      background 180ms ease,
+      box-shadow 180ms ease,
+      transform 180ms ease;
+  }
+  .metric:hover,
+  .summary-card:hover,
+  .chart-wrap:hover,
+  .passthrough-card:hover,
+  .login-card:hover {
+    border-color: rgba(95,180,164,0.34);
+    background: rgba(21,19,13,0.46);
+    box-shadow:
+      inset 0 0 0 1px rgba(95,180,164,0.025),
+      0 10px 30px -28px rgba(95,180,164,0.55);
+    transform: translateY(-1px);
+  }
+  .metric:hover .idx,
+  .summary-card:hover .title span {
+    color: var(--hero);
+  }
+  .num-pop {
+    display: inline-block;
+    animation: num-pop 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  @keyframes num-pop {
+    from { opacity: 0.72; transform: translateY(2px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  tbody tr {
+    position: relative;
+  }
+  tbody tr:hover td:first-child {
+    box-shadow: inset 2px 0 0 rgba(95,180,164,0.65);
+  }
+  tbody tr:hover td {
+    border-bottom-color: rgba(95,180,164,0.18);
+  }
+
+  .btn,
+  .filter-tools button,
+  .gran-toggle button,
+  .auth button {
+    transition:
+      background 140ms ease,
+      color 140ms ease,
+      border-color 140ms ease,
+      box-shadow 140ms ease,
+      transform 120ms ease;
+  }
+  .btn:hover,
+  .filter-tools button:hover,
+  .auth button:hover {
+    box-shadow: 0 0 0 3px rgba(95,180,164,0.055);
+  }
+
+  .modal-bg.active {
+    animation: modal-backdrop-in 160ms ease both;
+  }
+  .modal-bg.active .modal {
+    animation: modal-panel-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  @keyframes modal-backdrop-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes modal-panel-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.992); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .drawer-bg.active {
+    animation: modal-backdrop-in 160ms ease both;
+  }
+  .drawer-bg.active .drawer {
+    animation: drawer-in 240ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  @keyframes drawer-in {
+    from { opacity: 0; transform: translateX(18px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 1ms !important;
+    }
+  }
+
   @media (max-width: 880px) {
     .container { padding: 32px 24px 64px; }
     header { grid-template-columns: 1fr; }
@@ -634,7 +912,12 @@
     .metric:nth-child(2n)        { border-right: none; }
     .metric:nth-child(n+7)       { border-bottom: 1px solid var(--line); }
     .metric:nth-child(n+9)       { border-bottom: none; }
+    .totals.has-12 .metric:nth-child(n+9)  { border-bottom: 1px solid var(--line); }
+    .totals.has-12 .metric:nth-child(n+11) { border-bottom: none; }
+    .summary-grid { grid-template-columns: 1fr; margin-top: -24px; }
     .breakdowns { grid-template-columns: 1fr; gap: 48px; }
+    .groups-layout { grid-template-columns: 1fr; }
+    .passthrough-card { grid-template-columns: 1fr; }
     .hero .value { font-size: 96px; }
     .hero .split-bar { width: 100%; }
     .wordmark .sub { font-size: 40px; }
@@ -682,6 +965,14 @@
         <div class="field"><label>模型</label><select id="o-model"><option value="">全部</option></select></div>
         <div class="field"><label>&nbsp;</label><button class="apply" id="o-apply">应用</button></div>
       </div>
+      <div class="filter-tools fade-up" style="animation-delay: 100ms">
+        <span>快捷范围</span>
+        <button data-range="today">今天</button>
+        <button data-range="7d">7 日</button>
+        <button data-range="30d">30 日</button>
+        <button data-range="all">全部</button>
+        <span class="summary" id="filter-summary">全部时间 · 服务器本地时区</span>
+      </div>
 
       <section class="hero fade-up" style="animation-delay: 160ms">
         <div class="label">缓存命中率</div>
@@ -698,7 +989,7 @@
         </div>
       </section>
 
-      <section class="totals fade-up" style="animation-delay: 240ms">
+      <section class="totals has-12 fade-up" style="animation-delay: 240ms">
         <div class="metric"><span class="idx">01</span><span class="label">请求数</span><span class="value" id="t-requests">—</span></div>
         <div class="metric"><span class="idx">02</span><span class="label">总成本</span><span class="value cost" id="t-cost">$—</span></div>
         <div class="metric"><span class="idx">03</span><span class="label">网络搜索</span><span class="value search" id="t-search">—</span></div>
@@ -708,6 +999,30 @@
         <div class="metric"><span class="idx">07</span><span class="label">缓存写入 · 5分</span><span class="value" id="t-cache-5m">—</span></div>
         <div class="metric"><span class="idx">08</span><span class="label">缓存写入 · 1时</span><span class="value" id="t-cache-1h">—</span></div>
         <div class="metric"><span class="idx">09</span><span class="label">错误</span><span class="value error" id="t-errors">—</span></div>
+        <div class="metric"><span class="idx">10</span><span class="label">平均单次</span><span class="value cost" id="t-avg-cost">$—</span></div>
+        <div class="metric"><span class="idx">11</span><span class="label">流式请求</span><span class="value" id="t-streaming">—</span></div>
+        <div class="metric"><span class="idx">12</span><span class="label">失败率</span><span class="value error" id="t-error-rate">—</span></div>
+      </section>
+
+      <section class="summary-grid fade-up" style="animation-delay: 280ms">
+        <div class="summary-card">
+          <div class="title"><b>风险摘要</b><span>billing watch</span></div>
+          <div class="summary-items">
+            <div class="summary-item"><div class="k">最近 1 小时</div><div class="v cost" id="risk-hour-cost">$—</div></div>
+            <div class="summary-item"><div class="k">最高单次</div><div class="v cost" id="risk-max-cost">$—</div></div>
+            <div class="summary-item"><div class="k">低缓存请求</div><div class="v warn" id="risk-low-cache">—</div></div>
+            <div class="summary-item"><div class="k">最高单次模型</div><div class="v" id="risk-max-model">—</div></div>
+          </div>
+        </div>
+        <div class="summary-card">
+          <div class="title"><b>代理策略</b><span>privacy posture</span></div>
+          <div class="policy-list">
+            <div class="policy-line"><span class="mark">ON</span><span>Responses 强制 <b>store=false</b></span></div>
+            <div class="policy-line"><span class="mark">ON</span><span>顶层 <b>metadata</b> 出站删除</span></div>
+            <div class="policy-line"><span class="mark">OK</span><span>成功请求 body 不落库</span></div>
+            <div class="policy-line"><span class="mark dim">NOTE</span><span>错误 body 仅截断留存用于诊断</span></div>
+          </div>
+        </div>
       </section>
 
       <section class="section fade-up" style="animation-delay: 320ms">
@@ -747,6 +1062,20 @@
               <h2>按模型</h2><span class="h-serif">何模</span><span class="rule"></span><span class="count" id="model-count">— 行</span>
             </div>
             <table id="model-table"></table>
+          </div>
+        </div>
+        <div class="breakdowns" style="margin-top: 36px">
+          <div>
+            <div class="section-head">
+              <h2>按服务商</h2><span class="h-serif">何源</span><span class="rule"></span><span class="count" id="provider-count">— 行</span>
+            </div>
+            <table id="provider-table"></table>
+          </div>
+          <div>
+            <div class="section-head">
+              <h2>按端点</h2><span class="h-serif">何路</span><span class="rule"></span><span class="count" id="endpoint-count">— 行</span>
+            </div>
+            <table id="endpoint-table"></table>
           </div>
         </div>
       </section>
@@ -797,7 +1126,7 @@
       <p style="color:var(--fg-dim);font-size:12px;margin:0 0 24px;letter-spacing:0.02em">
         从大组库存里挑模型，给每个起一个对外逻辑名（如 sonnet / opus）。同一逻辑名可挂多个上游，手动切「主用」即可零感知换上游。proxy key 绑定一个分组作为可用模型白名单。
       </p>
-      <div style="display:grid;grid-template-columns:240px 1fr;gap:24px;align-items:start">
+      <div class="groups-layout">
         <div>
           <div class="section-head" style="margin-top:0"><h2 style="font-size:14px">分组列表</h2></div>
           <div id="groups-list"></div>
@@ -808,10 +1137,10 @@
             <span class="rule"></span>
             <div class="right"><button class="btn ghost" id="grp-add-mapping" style="display:none">添加映射</button></div>
           </div>
-          <div id="grp-passthrough-row" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 16px;padding:10px 12px;border:1px solid var(--rule);border-radius:2px">
-            <span style="font-size:11px;color:var(--fg-dim)">透传服务商</span>
-            <select id="grp-passthrough" style="min-width:180px"></select>
-            <span style="font-size:10px;color:var(--fg-sub);flex:1;min-width:200px">未命中映射的模型原样发给它（= 该服务商全量放行）；选「无」则仅允许下方已映射的逻辑名。</span>
+          <div id="grp-passthrough-row" class="passthrough-card">
+            <span class="label">透传服务商</span>
+            <select id="grp-passthrough"></select>
+            <span class="hint">未命中映射的模型原样发给它（该服务商全量放行）；选「无」则仅允许下方已映射的逻辑名。</span>
           </div>
           <table id="mappings-table"></table>
         </div>
@@ -847,8 +1176,10 @@
         <span class="count" id="logs-count">— 条</span>
       </div>
       <table id="logs-table"></table>
-      <div style="text-align:center;margin-top:24px">
-        <button class="btn ghost" id="logs-more" style="display:none">加载更早</button>
+      <div class="logs-pager">
+        <button class="btn ghost" id="logs-prev">上一页</button>
+        <span class="state" id="logs-page-info">第 1 / 1 页</span>
+        <button class="btn ghost" id="logs-next">下一页</button>
       </div>
     </section>
 
@@ -925,14 +1256,26 @@
           <select id="mp-format">
             <option value="anthropic">anthropic（原生 /v1/messages）</option>
             <option value="openai">openai（/v1/chat/completions）</option>
+            <option value="hybrid">hybrid（下游选择 messages / oai）</option>
           </select>
         </div>
       </div>
-      <div class="grid full">
+      <div class="grid full" id="mp-single-url-row">
         <div class="field"><label>Base URL</label><input id="mp-baseurl" type="text" placeholder="https://api.anthropic.com"></div>
+      </div>
+      <div class="grid" id="mp-hybrid-url-row" style="display:none">
+        <div class="field"><label>OpenAI Base URL</label><input id="mp-openai-baseurl" type="text" placeholder="https://api.deepseek.com"></div>
+        <div class="field"><label>Anthropic Base URL</label><input id="mp-anthropic-baseurl" type="text" placeholder="https://api.deepseek.com/anthropic"></div>
       </div>
       <div class="grid full">
         <div class="field"><label id="mp-key-label">API Key</label><input id="mp-apikey" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false"></div>
+      </div>
+      <div class="grid full">
+        <div class="field">
+          <label>参数覆盖 JSON</label>
+          <textarea id="mp-overrides" rows="8" spellcheck="false" style="font-family:var(--mono);font-size:11px;line-height:1.6"></textarea>
+          <span class="dim" style="font-size:10px;letter-spacing:0.04em">支持 set / delete；默认服务商留空会使用内置安全策略，已有自定义规则清空保存则关闭覆盖。</span>
+        </div>
       </div>
       <div class="grid full">
         <div class="field" style="flex-direction:row;align-items:center;gap:8px">
@@ -1036,6 +1379,9 @@
   (function() {
     const $ = (s) => document.querySelector(s);
     const $$ = (s) => Array.from(document.querySelectorAll(s));
+    const DEMO_MODE = location.pathname === '/demo' || location.pathname.startsWith('/demo/');
+    const apiPath = (path) => DEMO_MODE && path.startsWith('/admin/') ? '/demo' + path : path;
+    const authPath = (path) => DEMO_MODE && path.startsWith('/auth/') ? '/demo' + path : path;
 
     // ---------- auth ----------
     let currentToken = localStorage.getItem('claude-proxy-token') || '';
@@ -1063,10 +1409,10 @@
       const changePw = $('#change-pw');
       const logoutBtn = $('#logout');
       if (user) {
-        authUser.textContent = user.username;
+        authUser.textContent = DEMO_MODE ? 'demo' : user.username;
         authUser.style.display = '';
-        changePw.style.display = '';
-        logoutBtn.style.display = '';
+        changePw.style.display = DEMO_MODE ? 'none' : '';
+        logoutBtn.style.display = DEMO_MODE ? 'none' : '';
       } else {
         authUser.style.display = 'none';
         changePw.style.display = 'none';
@@ -1075,7 +1421,7 @@
     }
 
     async function adminFetch(path, opts) {
-      if (!currentToken) throw new Error('未登录');
+      if (!currentToken && !DEMO_MODE) throw new Error('未登录');
       const fullOpts = Object.assign({}, opts || {});
       fullOpts.headers = Object.assign({}, fullOpts.headers || {}, {
         'Authorization': 'Bearer ' + currentToken,
@@ -1084,7 +1430,7 @@
         fullOpts.body = JSON.stringify(fullOpts.body);
         fullOpts.headers['Content-Type'] = 'application/json';
       }
-      const resp = await fetch(path, fullOpts);
+      const resp = await fetch(apiPath(path), fullOpts);
       if (resp.status === 401) {
         // session 过期 → 回登录页
         showLogin();
@@ -1104,7 +1450,7 @@
       $('#login-err').textContent = '';
       if (!username || !password) { $('#login-err').textContent = '请填写用户名和密码'; return; }
       try {
-        const res = await fetch('/auth/login', {
+        const res = await fetch(authPath('/auth/login'), {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({username, password}),
@@ -1128,7 +1474,7 @@
 
     // 退出
     $('#logout').addEventListener('click', async () => {
-      try { await fetch('/auth/logout', {method:'POST', headers:{'Authorization':'Bearer '+currentToken}}); } catch (_) {}
+      try { await fetch(authPath('/auth/logout'), {method:'POST', headers:{'Authorization':'Bearer '+currentToken}}); } catch (_) {}
       showLogin();
     });
 
@@ -1139,16 +1485,21 @@
       const newPw = prompt('新密码（至少6位）：');
       if (newPw == null || newPw.length < 6) { alert('新密码不能少于6位'); return; }
       try {
-        await adminFetch('/auth/password', {method:'POST', body:{old:oldPw, new:newPw}});
+        await adminFetch(authPath('/auth/password'), {method:'POST', body:{old:oldPw, new:newPw}});
         alert('密码已更新，下次登录时生效');
       } catch (e) { alert('修改失败：' + e.message); }
     });
 
     // 页面加载：检查登录态
     async function checkAuth() {
+      if (DEMO_MODE) {
+        currentToken = 'demo';
+        showDashboard({username: 'demo'});
+        return;
+      }
       if (!currentToken) { showLogin(); return; }
       try {
-        const res = await fetch('/auth/me', {headers:{'Authorization':'Bearer '+currentToken}});
+        const res = await fetch(authPath('/auth/me'), {headers:{'Authorization':'Bearer '+currentToken}});
         if (!res.ok) throw new Error('unauthorized');
         const user = await res.json();
         showDashboard(user);
@@ -1173,6 +1524,63 @@
       const pct = n * 100;
       return pct >= 10 ? pct.toFixed(1) : pct.toFixed(2);
     };
+    const numberAnims = new Map();
+    const prefersReducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+    function currentAnimatedValue(el) {
+      if (!el || !Number.isFinite(el._numValue)) return null;
+      return el._numValue;
+    }
+    function animateNumber(id, next, formatter, opts) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      if (next == null || !Number.isFinite(Number(next))) {
+        el.textContent = '—';
+        el._numValue = null;
+        return;
+      }
+      next = Number(next);
+      const duration = (opts && opts.duration) || 760;
+      const fromStored = currentAnimatedValue(el);
+      const from = fromStored == null ? (opts && opts.fromZero ? 0 : next) : fromStored;
+      if (prefersReducedMotion || Math.abs(from - next) < 1e-9) {
+        el.textContent = formatter(next);
+        el._numValue = next;
+        return;
+      }
+      const prev = numberAnims.get(id);
+      if (prev) cancelAnimationFrame(prev);
+      const start = performance.now();
+      const step = (now) => {
+        const t = Math.min(1, (now - start) / duration);
+        const val = from + (next - from) * easeOutCubic(t);
+        el.textContent = formatter(val);
+        el._numValue = val;
+        if (t < 1) {
+          numberAnims.set(id, requestAnimationFrame(step));
+        } else {
+          numberAnims.delete(id);
+          el.textContent = formatter(next);
+          el._numValue = next;
+          el.classList.remove('num-pop');
+          void el.offsetWidth;
+          el.classList.add('num-pop');
+        }
+      };
+      numberAnims.set(id, requestAnimationFrame(step));
+    }
+    function setAnimatedText(id, text) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const changed = el.textContent !== text;
+      el.textContent = text;
+      el._numValue = null;
+      if (changed && !prefersReducedMotion) {
+        el.classList.remove('num-pop');
+        void el.offsetWidth;
+        el.classList.add('num-pop');
+      }
+    }
     const fmtTime = (s) => {
       const d = new Date(s);
       const pad = (n) => String(n).padStart(2, '0');
@@ -1214,7 +1622,7 @@
       else if (route === 'keys') { fetchKeys(); }
       else if (route === 'providers') { fetchProviders(); }
       else if (route === 'groups') { fetchGroups(); }
-      else if (route === 'logs') { logsCursor = 0; logsRows = []; fetchLogs(); fillLogsFilterSelects(); }
+      else if (route === 'logs') { resetLogsPage(); fillLogsFilterSelects(); }
     }
     function reloadCurrent() { loadRoute(currentRoute()); }
 
@@ -1235,6 +1643,45 @@
     if (restored.until) $('#o-until').value = restored.until;
 
     $('#o-apply').addEventListener('click', () => { fetchStats(); fetchTimeseries(); });
+    $('#o-since').addEventListener('change', () => setActiveRange(''));
+    $('#o-until').addEventListener('change', () => setActiveRange(''));
+
+    let serverToday = '';
+    let serverTimezone = '服务器本地时区';
+    function shiftDate(value, days) {
+      const [y, m, d] = value.split('-').map(Number);
+      const date = new Date(Date.UTC(y, m - 1, d + days));
+      return date.toISOString().slice(0, 10);
+    }
+    function setActiveRange(range) {
+      $$('.filter-tools button[data-range]').forEach(b => b.classList.toggle('active', b.dataset.range === range));
+    }
+    $$('.filter-tools button[data-range]').forEach(btn => btn.addEventListener('click', () => {
+      const range = btn.dataset.range;
+      const today = serverToday || new Date().toISOString().slice(0, 10);
+      if (range === 'all') {
+        $('#o-since').value = '';
+        $('#o-until').value = '';
+      } else {
+        const days = range === 'today' ? 1 : range === '7d' ? 7 : 30;
+        $('#o-since').value = shiftDate(today, -days + 1);
+        $('#o-until').value = today;
+      }
+      setActiveRange(range);
+      fetchStats(); fetchTimeseries();
+    }));
+
+    function updateFilterSummary() {
+      const since = $('#o-since').value, until = $('#o-until').value;
+      const pk = $('#o-proxy-key').value, md = $('#o-model').value;
+      let range = '全部时间';
+      if (since && until && since === until) range = since + ' 整日';
+      else if (since || until) range = (since || '最早') + ' 至 ' + (until || '现在') + (until ? '（含截止日）' : '');
+      const extra = [];
+      if (pk) extra.push('Key ' + truncKey(pk));
+      if (md) extra.push('模型 ' + md);
+      $('#filter-summary').textContent = range + (extra.length ? ' · ' + extra.join(' · ') : '') + ' · ' + serverTimezone;
+    }
 
     function overviewFilterParams() {
       const p = new URLSearchParams();
@@ -1245,6 +1692,15 @@
       if (pk) p.set('proxy_key', pk);
       if (md) p.set('model', md);
       localStorage.setItem('claude-proxy-filters', JSON.stringify({since, until}));
+      updateFilterSummary();
+      return p;
+    }
+
+    function overviewOptionParams() {
+      const p = new URLSearchParams();
+      const since = $('#o-since').value, until = $('#o-until').value;
+      if (since) p.set('since', since);
+      if (until) p.set('until', until);
       return p;
     }
 
@@ -1253,9 +1709,14 @@
       setStatus('stale', '拉取中');
       try {
         const t0 = performance.now();
-        const data = await adminFetch('/admin/stats?' + overviewFilterParams());
+        const params = overviewFilterParams();
+        const optionParams = overviewOptionParams();
+        const [data, optionData] = await Promise.all([
+          adminFetch('/admin/stats?' + params),
+          adminFetch('/admin/stats?' + optionParams),
+        ]);
         const dt = Math.round(performance.now() - t0);
-        renderOverview(data);
+        renderOverview(data, optionData);
         setStatus('live', '在线 · ' + dt + 'ms');
         $('#footer-status').textContent = '同步 ' + new Date().toTimeString().slice(0,8);
       } catch (e) {
@@ -1264,24 +1725,38 @@
       }
     }
 
-    function renderOverview(data) {
+    function renderOverview(data, optionData) {
+      serverToday = data.server_date || serverToday;
+      serverTimezone = data.timezone ? ('服务器时区 ' + data.timezone) : serverTimezone;
+      updateFilterSummary();
       const hitPct = data.cache_hit_rate || 0;
-      $('#hit-rate').textContent = fmtPct(hitPct);
-      $('#hit-cached').textContent = fmtInt(data.cache_read);
-      $('#hit-fresh').textContent = fmtInt(data.input_tokens);
+      animateNumber('hit-rate', hitPct, fmtPct, { fromZero: true, duration: 900 });
+      animateNumber('hit-cached', data.cache_read || 0, fmtInt, { fromZero: true, duration: 820 });
+      animateNumber('hit-fresh', data.input_tokens || 0, fmtInt, { fromZero: true, duration: 820 });
       $('#bar-cached').style.width = (hitPct * 100).toFixed(1) + '%';
 
-      $('#t-requests').textContent  = fmtInt(data.requests);
-      $('#t-cost').textContent      = fmtCost(data.cost_usd);
-      $('#t-search').textContent    = fmtInt(data.web_search_count);
-      $('#t-input').textContent     = fmtInt(data.input_tokens);
-      $('#t-output').textContent    = fmtInt(data.output_tokens);
-      $('#t-cache-read').textContent= fmtInt(data.cache_read);
-      $('#t-cache-5m').textContent  = fmtInt(data.cache_create_5m);
-      $('#t-cache-1h').textContent  = fmtInt(data.cache_create_1h);
-      $('#t-errors').textContent    = fmtInt(data.errors);
+      animateNumber('t-requests', data.requests || 0, fmtInt, { fromZero: true });
+      animateNumber('t-cost', data.cost_usd || 0, fmtCost, { fromZero: true });
+      animateNumber('t-search', data.web_search_count || 0, fmtInt, { fromZero: true });
+      animateNumber('t-input', data.input_tokens || 0, fmtInt, { fromZero: true });
+      animateNumber('t-output', data.output_tokens || 0, fmtInt, { fromZero: true });
+      animateNumber('t-cache-read', data.cache_read || 0, fmtInt, { fromZero: true });
+      animateNumber('t-cache-5m', data.cache_create_5m || 0, fmtInt, { fromZero: true });
+      animateNumber('t-cache-1h', data.cache_create_1h || 0, fmtInt, { fromZero: true });
+      animateNumber('t-errors', data.errors || 0, fmtInt, { fromZero: true });
+      animateNumber('t-avg-cost', data.requests > 0 ? data.cost_usd / data.requests : 0, fmtCost, { fromZero: true });
+      animateNumber('t-streaming', data.risk?.streaming_requests || 0, fmtInt, { fromZero: true });
+      animateNumber('t-error-rate', data.requests > 0 ? (data.errors || 0) / data.requests : 0, (n) => fmtPct(n) + '%', { fromZero: true });
 
-      ['t-search','t-cache-1h','t-errors'].forEach(id => {
+      const risk = data.risk || {};
+      animateNumber('risk-hour-cost', risk.recent_hour_cost || 0, fmtCost, { fromZero: true });
+      animateNumber('risk-max-cost', risk.max_request_cost || 0, fmtCost, { fromZero: true });
+      animateNumber('risk-low-cache', risk.low_cache_requests || 0, fmtInt, { fromZero: true });
+      setAnimatedText('risk-max-model', risk.max_request_model
+        ? (risk.max_request_model + (risk.max_request_time ? ' · ' + risk.max_request_time.slice(5) : ''))
+        : '—');
+
+      ['t-search','t-cache-1h','t-errors','t-streaming','risk-low-cache'].forEach(id => {
         const el = document.getElementById(id);
         if (el.textContent === '0') el.classList.add('zero');
         else el.classList.remove('zero');
@@ -1289,20 +1764,29 @@
 
       renderBreakdown('#key-table', '#key-count', data.by_proxy_key || []);
       renderBreakdown('#model-table', '#model-count', data.by_model || []);
-      populateSelect('#o-proxy-key', data.by_proxy_key, $('#o-proxy-key').value);
-      populateSelect('#o-model',     data.by_model,     $('#o-model').value);
+      renderBreakdown('#provider-table', '#provider-count', data.by_provider || []);
+      renderBreakdown('#endpoint-table', '#endpoint-count', data.by_endpoint || []);
+      const opts = optionData || data;
+      populateSelect('#o-proxy-key', opts.by_proxy_key, $('#o-proxy-key').value);
+      populateSelect('#o-model',     opts.by_model,     $('#o-model').value);
     }
 
     function renderOverviewEmpty(msg) {
-      ['hit-rate','t-requests','t-cost','t-search','t-input','t-output','t-cache-read','t-cache-5m','t-cache-1h','t-errors','hit-cached','hit-fresh']
+      ['hit-rate','t-requests','t-cost','t-search','t-input','t-output','t-cache-read','t-cache-5m','t-cache-1h','t-errors','t-avg-cost','t-streaming','t-error-rate','hit-cached','hit-fresh','risk-hour-cost','risk-max-cost','risk-low-cache','risk-max-model']
         .forEach(id => {
+          const raf = numberAnims.get(id);
+          if (raf) cancelAnimationFrame(raf);
+          numberAnims.delete(id);
           const el = document.getElementById(id);
           const sample = id.includes('cost') ? '$00.00' : '00,000';
+          el._numValue = null;
           el.innerHTML = '<span class="redact">' + sample + '</span>';
         });
       $('#bar-cached').style.width = '0%';
       $('#key-table').innerHTML   = '<tbody><tr><td class="empty" colspan="5">' + escHTML(msg) + '</td></tr></tbody>';
       $('#model-table').innerHTML = '<tbody><tr><td class="empty" colspan="5">' + escHTML(msg) + '</td></tr></tbody>';
+      $('#provider-table').innerHTML = '<tbody><tr><td class="empty" colspan="5">' + escHTML(msg) + '</td></tr></tbody>';
+      $('#endpoint-table').innerHTML = '<tbody><tr><td class="empty" colspan="5">' + escHTML(msg) + '</td></tr></tbody>';
       $('#chart').innerHTML = '<text x="350" y="130" fill="#524d3c" text-anchor="middle" font-size="12" letter-spacing="0.1em">' + escHTML(msg) + '</text>';
       $('#footer-status').textContent = '闲置';
     }
@@ -1342,6 +1826,9 @@
         if (!k || seen.has(k)) continue;
         seen.add(k);
         opts.push('<option value="' + escHTML(k) + '"' + (k === current ? ' selected' : '') + '>' + escHTML(k) + '</option>');
+      }
+      if (current && !seen.has(current)) {
+        opts.push('<option value="' + escHTML(current) + '" selected>' + escHTML(current) + '</option>');
       }
       el.innerHTML = opts.join('');
     }
@@ -1503,7 +1990,7 @@
         try { groupsCache = await adminFetch('/admin/groups') || []; } catch (e) {}
         renderKeys(list || []);
       } catch (e) {
-        $('#keys-table').innerHTML = '<tbody><tr><td class="empty" colspan="7">' + escHTML(e.message) + '</td></tr></tbody>';
+        $('#keys-table').innerHTML = '<tbody><tr><td class="empty" colspan="10">' + escHTML(e.message) + '</td></tr></tbody>';
       }
     }
 
@@ -1516,11 +2003,11 @@
     function renderKeys(rows) {
       const t = $('#keys-table');
       if (rows.length === 0) {
-        t.innerHTML = '<tbody><tr><td class="empty" colspan="8">尚无密钥。点击右上「新建密钥」开始。</td></tr></tbody>';
+        t.innerHTML = '<tbody><tr><td class="empty" colspan="10">尚无密钥。点击右上「新建密钥」开始。</td></tr></tbody>';
         return;
       }
       let html = '<thead><tr>';
-      html += '<th>密钥</th><th>归属</th><th>备注</th><th class="num">日预算</th><th>分组</th><th>创建</th><th>状态</th><th class="actions">操作</th>';
+      html += '<th>密钥</th><th>归属</th><th>备注</th><th class="num">日预算</th><th class="num">今日消费</th><th class="num">剩余</th><th>分组</th><th>创建</th><th>状态</th><th class="actions">操作</th>';
       html += '</tr></thead><tbody>';
       for (const k of rows) {
         const revoked = !!k.revoked_at;
@@ -1529,6 +2016,9 @@
         html += '<td class="dim" title="创建者（不可转让）">' + escHTML(k.creator || '—') + '</td>';
         html += '<td class="dim">' + escHTML(k.owner || '—') + '</td>';
         html += '<td class="num ' + (k.daily_budget > 0 ? 'cost' : 'zero') + '">' + (k.daily_budget > 0 ? fmtCost(k.daily_budget) : '无限') + '</td>';
+        const remain = k.budget_remaining;
+        html += '<td class="num ' + (k.today_cost > 0 ? 'cost' : 'zero') + '" title="今日 ' + fmtInt(k.today_requests || 0) + ' 次请求">' + fmtCost(k.today_cost || 0) + '</td>';
+        html += '<td class="num ' + (remain != null && remain < 0 ? 'error' : 'dim') + '">' + (remain == null ? '无限' : remain < 0 ? ('超出 ' + fmtCost(-remain)) : fmtCost(remain)) + '</td>';
         html += '<td class="dim">' + escHTML(groupName(k.group_id != null ? k.group_id : null)) + '</td>';
         html += '<td class="dim">' + escHTML(fmtTime(k.created_at)) + '</td>';
         html += '<td>' + (revoked
@@ -1630,9 +2120,14 @@
     // PROVIDER MODELS（大组库存：手动策展 + 按服务商计价）
     // =================================================
     function fmtPrice(m) {
-      if (m.price_input == null && m.price_output == null) return '<span class="dim" style="color:var(--fg-sub)">默认价表</span>';
-      const io = (m.price_input != null ? '$' + m.price_input : '$0') + ' / ' + (m.price_output != null ? '$' + m.price_output : '$0');
-      return '<span class="mono" style="font-size:11px">' + escHTML(io) + '</span>';
+      const p = m.effective_price;
+      if (!p) return '<span class="dim" style="color:var(--fg-sub)">未配置 · 计费 $0</span>';
+      const io = '$' + p.Input + ' / $' + p.Output;
+      const cache = ' · 缓存 ' + '$' + p.CacheWrite5m + '/' + '$' + p.CacheWrite1h + '/' + '$' + p.CacheRead;
+      const source = m.effective_price_source === 'override' ? '覆盖' : '默认';
+      const cls = m.effective_price_source === 'override' ? 'cost' : 'dim';
+      return '<span class="mono ' + cls + '" style="font-size:11px" title="缓存写5m / 写1h / 读：' + escHTML(cache) + '">' +
+        escHTML(io) + '</span> <span class="dim" style="font-size:10px;color:var(--fg-sub)">' + source + '</span>';
     }
 
     // ---------- 管理模型 modal（拉上游目录 → 勾选加入大组 / 改价 / 移除）----------
@@ -1816,36 +2311,97 @@
 
     // ---------- provider modal ----------
     let modalProvEditing = null;
+    const defaultAnthropicOverrides = `{
+  "operations": [
+    {
+      "mode": "delete",
+      "description": "删除顶层 metadata，减少客户端信息暴露",
+      "path": "metadata"
+    }
+  ]
+}`;
+    const defaultOpenAIOverrides = `{
+  "operations": [
+    {
+      "mode": "set",
+      "description": "强制 store=false，阻止上游存储对话内容",
+      "path": "store",
+      "value": false
+    },
+    {
+      "mode": "delete",
+      "description": "删除顶层 metadata，减少客户端信息暴露",
+      "path": "metadata"
+    }
+  ]
+}`;
+    function defaultOverridesForFormat(format) {
+      if (format === 'hybrid') return '';
+      return format === 'openai' ? defaultOpenAIOverrides : defaultAnthropicOverrides;
+    }
+    function syncProviderURLFields() {
+      const format = $('#mp-format').value;
+      const isHybrid = format === 'hybrid';
+      $('#mp-single-url-row').style.display = isHybrid ? 'none' : '';
+      $('#mp-hybrid-url-row').style.display = isHybrid ? '' : 'none';
+    }
     function openProvModal(p) {
       modalProvEditing = p;
       $('#modal-prov-title').textContent = p ? '编辑服务商' : '新建服务商';
       $('#mp-name').value = p ? p.name : '';
       $('#mp-format').value = p ? p.format : 'anthropic';
       $('#mp-baseurl').value = p ? p.base_url : '';
+      $('#mp-openai-baseurl').value = p ? (p.openai_base_url || p.base_url || '') : '';
+      $('#mp-anthropic-baseurl').value = p ? (p.anthropic_base_url || p.base_url || '') : '';
       $('#mp-apikey').value = '';
       $('#mp-apikey').placeholder = p ? '留空 = 不修改（当前 ' + (p.masked_key || '无') + '）' : 'sk-...';
+      $('#mp-overrides').value = p ? (p.request_overrides || '') : defaultOverridesForFormat($('#mp-format').value);
       $('#mp-enabled').checked = p ? p.enabled : true;
+      syncProviderURLFields();
       $('#modal-prov-bg').classList.add('active');
     }
+    $('#mp-format').addEventListener('change', () => {
+      syncProviderURLFields();
+      if (!modalProvEditing) $('#mp-overrides').value = defaultOverridesForFormat($('#mp-format').value);
+    });
     $('#mp-cancel').addEventListener('click', () => $('#modal-prov-bg').classList.remove('active'));
     $('#modal-prov-bg').addEventListener('click', (e) => {
       if (e.target === $('#modal-prov-bg')) $('#modal-prov-bg').classList.remove('active');
     });
     $('#mp-save').addEventListener('click', async () => {
       const name = $('#mp-name').value.trim();
-      const base_url = $('#mp-baseurl').value.trim();
       const api_key = $('#mp-apikey').value;
       const format = $('#mp-format').value;
+      let base_url = $('#mp-baseurl').value.trim();
+      let openai_base_url = $('#mp-openai-baseurl').value.trim();
+      let anthropic_base_url = $('#mp-anthropic-baseurl').value.trim();
       const enabled = $('#mp-enabled').checked;
+      const request_overrides = $('#mp-overrides').value.trim();
+      if (format === 'hybrid') {
+        if (!openai_base_url && !anthropic_base_url) { alert('混合协议至少填写一个 Base URL'); return; }
+        if (!openai_base_url) openai_base_url = anthropic_base_url;
+        if (!anthropic_base_url) anthropic_base_url = openai_base_url;
+        base_url = openai_base_url;
+      } else {
+        openai_base_url = '';
+        anthropic_base_url = '';
+      }
       if (!name || !base_url) { alert('名称和 Base URL 必填'); return; }
+      if (request_overrides) {
+        try { JSON.parse(request_overrides); }
+        catch (e) { alert('参数覆盖 JSON 格式错误：' + e.message); return; }
+      }
       try {
         if (modalProvEditing) {
-          const body = { name, base_url, format, enabled };
+          const body = { name, base_url, openai_base_url, anthropic_base_url, format, enabled };
+          if (request_overrides || !modalProvEditing.request_overrides_is_default) body.request_overrides = request_overrides;
           if (api_key) body.api_key = api_key; // 空 = 不改
           await adminFetch('/admin/providers/' + modalProvEditing.id, { method: 'PATCH', body });
         } else {
           if (!api_key) { alert('新建时必须填 API Key'); return; }
-          await adminFetch('/admin/providers', { method: 'POST', body: { name, base_url, api_key, format, enabled } });
+          const body = { name, base_url, openai_base_url, anthropic_base_url, api_key, format, enabled };
+          if (request_overrides) body.request_overrides = request_overrides;
+          await adminFetch('/admin/providers', { method: 'POST', body });
         }
         $('#modal-prov-bg').classList.remove('active');
         fetchProviders();
@@ -1895,10 +2451,9 @@
         return;
       }
       el.innerHTML = rows.map(g => {
-        const active = g.id === selectedGroupId ? ' style="border-color:var(--hero);color:var(--fg)"' : '';
-        return '<div class="grp-item" data-id="' + g.id + '"' + active +
-          ' style="padding:10px 12px;border:1px solid var(--rule);border-radius:2px;margin-bottom:8px;cursor:pointer;display:flex;justify-content:space-between;align-items:center">' +
-          '<span>' + escHTML(g.name) + '</span>' +
+        const active = g.id === selectedGroupId ? ' active' : '';
+        return '<div class="grp-item' + active + '" data-id="' + g.id + '">' +
+          '<span class="name" title="' + escHTML(g.name) + '">' + escHTML(g.name) + '</span>' +
           '<button class="btn ghost" data-act="del-grp" style="padding:2px 8px;font-size:10px;color:var(--error)">删</button>' +
           '</div>';
       }).join('');
@@ -1976,7 +2531,7 @@
           '<option value="' + p.id + '">' + escHTML(p.name) + ' (' + p.format + ')</option>'));
       sel.innerHTML = opts.join('');
       sel.value = g.passthrough_provider_id != null ? String(g.passthrough_provider_id) : '';
-      row.style.display = 'flex';
+      row.style.display = 'grid';
     }
     $('#grp-passthrough').addEventListener('change', async (e) => {
       if (!selectedGroupId) return;
@@ -2045,11 +2600,22 @@
     // =================================================
     // LOGS
     // =================================================
-    let logsCursor = 0;
+    let logsPage = 1;
+    let logsTotalPages = 1;
+    let logsTotal = 0;
     let logsRows = [];
 
-    $('#lg-apply').addEventListener('click', () => { logsCursor = 0; logsRows = []; fetchLogs(); });
-    $('#logs-more').addEventListener('click', () => fetchLogs(true));
+    $('#lg-apply').addEventListener('click', () => resetLogsPage());
+    $('#logs-prev').addEventListener('click', () => {
+      if (logsPage <= 1) return;
+      logsPage--;
+      fetchLogs();
+    });
+    $('#logs-next').addEventListener('click', () => {
+      if (logsPage >= logsTotalPages) return;
+      logsPage++;
+      fetchLogs();
+    });
 
     async function fillLogsFilterSelects() {
       // 用 stats 接口的 by_proxy_key / by_model 来填，避免再做一个轻量列表接口
@@ -2060,38 +2626,55 @@
       } catch (e) {}
     }
 
+    function resetLogsPage() {
+      logsPage = 1;
+      logsTotalPages = 1;
+      logsTotal = 0;
+      logsRows = [];
+      fetchLogs();
+    }
+
     function logsParams() {
       const p = new URLSearchParams();
       const pk = $('#lg-proxy-key').value, md = $('#lg-model').value;
       const st = $('#lg-status').value, lim = $('#lg-limit').value;
+      p.set('page', logsPage);
       if (pk) p.set('proxy_key', pk);
       if (md) p.set('model', md);
       if (st) p.set('status', st);
       if (lim) p.set('limit', lim);
-      if (logsCursor) p.set('before_id', logsCursor);
       return p;
     }
 
-    async function fetchLogs(more) {
+    async function fetchLogs() {
       if (!currentToken) {
         $('#logs-table').innerHTML = '<tbody><tr><td class="empty" colspan="8">请先登录</td></tr></tbody>';
         return;
       }
+      const prevBtn = $('#logs-prev');
+      const nextBtn = $('#logs-next');
       try {
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
         const data = await adminFetch('/admin/logs?' + logsParams());
-        const fresh = data.logs || [];
-        if (more) logsRows = logsRows.concat(fresh);
-        else logsRows = fresh;
+        logsRows = data.logs || [];
+        logsPage = data.page || logsPage;
+        logsTotal = data.total || logsRows.length;
+        logsTotalPages = data.total_pages || Math.max(1, Math.ceil(logsTotal / (parseInt($('#lg-limit').value || '100', 10))));
+        if (logsTotalPages <= 0) logsTotalPages = 1;
+        if (logsPage > logsTotalPages) logsPage = logsTotalPages;
         renderLogs(logsRows);
-        $('#logs-count').textContent = logsRows.length + ' 条';
-        if (fresh.length > 0) {
-          logsCursor = fresh[fresh.length - 1].id;
-          $('#logs-more').style.display = (fresh.length >= parseInt($('#lg-limit').value || '100', 10)) ? '' : 'none';
-        } else {
-          $('#logs-more').style.display = 'none';
-        }
+        $('#logs-count').textContent = '共 ' + fmtInt(logsTotal) + ' 条';
+        $('#logs-page-info').textContent = logsTotal > 0
+          ? ('第 ' + fmtInt(logsPage) + ' / ' + fmtInt(logsTotalPages) + ' 页 · 本页 ' + fmtInt(logsRows.length) + ' 条')
+          : '无匹配记录';
+        prevBtn.disabled = logsPage <= 1;
+        nextBtn.disabled = logsPage >= logsTotalPages;
       } catch (e) {
         $('#logs-table').innerHTML = '<tbody><tr><td class="empty" colspan="8">' + escHTML(e.message) + '</td></tr></tbody>';
+        $('#logs-page-info').textContent = '加载失败';
+        prevBtn.disabled = logsPage <= 1;
+        nextBtn.disabled = true;
       }
     }
 

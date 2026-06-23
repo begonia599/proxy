@@ -36,6 +36,7 @@ const (
 	upstreamURL = "https://api.anthropic.com"
 	listenAddr  = ":8787"
 	dbPath      = "claude-proxy.db"
+	demoPath    = "demo_state.json"
 )
 
 // 进程级单例：被 admin handler 和 forward handler 共用。
@@ -90,6 +91,7 @@ func main() {
 	providerRegistry.RunPeriodic(30 * time.Minute)
 
 	rp := buildReverseProxy(cfg)
+	demoStore := NewDemoStore(demoPath)
 
 	mux := http.NewServeMux()
 
@@ -116,9 +118,34 @@ func main() {
 		w.Header().Set("cache-control", "no-store")
 		_, _ = w.Write(dashboardHTML)
 	})
+	mux.HandleFunc("/demo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/html; charset=utf-8")
+		w.Header().Set("cache-control", "no-store")
+		_, _ = w.Write(dashboardHTML)
+	})
+	mux.HandleFunc("/demo/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/html; charset=utf-8")
+		w.Header().Set("cache-control", "no-store")
+		_, _ = w.Write(dashboardHTML)
+	})
+	mux.HandleFunc("/demo/state", demoStateHandler(demoStore))
+	mux.HandleFunc("/demo/keys", demoKeysHandler(demoStore))
+	mux.HandleFunc("/demo/keys/", demoKeysHandler(demoStore))
+	mux.HandleFunc("/demo/admin/stats", demoAdminStatsHandler(demoStore))
+	mux.HandleFunc("/demo/admin/timeseries", demoAdminTimeseriesHandler(demoStore))
+	mux.HandleFunc("/demo/admin/keys", demoAdminKeysHandler(demoStore))
+	mux.HandleFunc("/demo/admin/keys/", demoAdminKeysHandler(demoStore))
+	mux.HandleFunc("/demo/admin/providers", demoAdminProvidersHandler())
+	mux.HandleFunc("/demo/admin/providers/", demoAdminProvidersHandler())
+	mux.HandleFunc("/demo/admin/groups", demoAdminGroupsHandler())
+	mux.HandleFunc("/demo/admin/groups/", demoAdminGroupsHandler())
+	mux.HandleFunc("/demo/admin/logs", demoAdminLogsHandler(demoStore))
+	mux.HandleFunc("/demo/admin/logs/", demoAdminLogsHandler(demoStore))
 
 	// OpenAI 兼容层
 	mux.HandleFunc("/v1/chat/completions", openaiChatHandler(cfg))
+	mux.HandleFunc("/v1/responses", openaiResponsesHandler(cfg, false))
+	mux.HandleFunc("/v1/responses/compact", openaiResponsesHandler(cfg, true))
 
 	// /v1/models: 按 auth 风格分发——Bearer → OpenAI 格式，x-api-key → Anthropic 格式
 	oaiModels := openaiModelsHandler()
@@ -134,6 +161,10 @@ func main() {
 	mux.HandleFunc("/", forwardHandler(cfg, rp))
 
 	log.Printf("claude-proxy listening on %s, upstream %s", listenAddr, upstreamURL)
-	// admin token 已废弃：鉴权改用账号密码登录（见启动时的 admin 引导日志）。
-	log.Fatal(http.ListenAndServe(listenAddr, mux))
+	srv := &http.Server{
+		Addr:        listenAddr,
+		Handler:     mux,
+		IdleTimeout: 10 * time.Minute,
+	}
+	log.Fatal(srv.ListenAndServe())
 }

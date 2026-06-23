@@ -8,12 +8,15 @@ claude-proxy
 claude-proxy~
 claude-proxy.bin
 claude-proxy.bak-*
+claude-proxy.pre-*
 claude-proxy.new
 
 # SQLite database (contains generated proxy keys + request logs)
 *.db
+*.db.backup-*
 *.db-wal
 *.db-shm
+demo_state.json
 
 # Legacy log format
 usage.jsonl

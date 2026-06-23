@@ -301,15 +301,19 @@ func (r *ProviderRegistry) GroupAnyProvider(groupID int64) (*Provider, bool) {
 // 给配置页"拉取上游模型 → 勾选加入大组"用。Anthropic 与 OpenAI 的响应都是
 // {data:[{id,...}]}，鉴权头不同。
 func (r *ProviderRegistry) UpstreamCatalog(p *Provider) ([]string, error) {
-	url := p.BaseURL + "/v1/models?limit=100"
+	baseURL := providerAnthropicBaseURL(p)
+	if providerSupportsOpenAI(p) {
+		// hybrid 默认用 OpenAI 目录拉取；多数兼容供应商的 /v1/models 更接近 OpenAI 形态。
+		baseURL = providerOpenAIBaseURL(p)
+	}
+	url := baseURL + "/v1/models?limit=100"
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	switch p.Format {
-	case "openai":
+	if providerSupportsOpenAI(p) {
 		req.Header.Set("authorization", "Bearer "+p.APIKey)
-	default: // anthropic
+	} else {
 		req.Header.Set("x-api-key", p.APIKey)
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}

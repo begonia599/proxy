@@ -26,12 +26,28 @@ func parseTime(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unrecognized time: %s", s)
 }
 
+// parseUntil treats a date-only upper bound as the end of that calendar day.
+// StatsFilter uses an exclusive upper bound, so 2026-06-21 becomes
+// 2026-06-22 00:00 in the server's local timezone.
+func parseUntil(s string) (time.Time, error) {
+	t, err := parseTime(s)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(s) == len("2006-01-02") {
+		t = t.AddDate(0, 0, 1)
+	}
+	return t, nil
+}
+
 func adminStatsHandler(cfg *Config) http.HandlerFunc {
 	h := func(w http.ResponseWriter, r *http.Request) {
+		user := currentUser(r)
 		q := r.URL.Query()
 		f := StatsFilter{
 			ProxyKey: q.Get("proxy_key"),
 			Model:    q.Get("model"),
+			Creator:  user.Username,
 		}
 		if s := q.Get("since"); s != "" {
 			t, err := parseTime(s)
@@ -42,7 +58,7 @@ func adminStatsHandler(cfg *Config) http.HandlerFunc {
 			f.Since = t
 		}
 		if s := q.Get("until"); s != "" {
-			t, err := parseTime(s)
+			t, err := parseUntil(s)
 			if err != nil {
 				http.Error(w, `{"error":"bad until"}`, http.StatusBadRequest)
 				return
@@ -94,6 +110,10 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 				}
 				if list == nil {
 					list = []KeyMeta{}
+				}
+				if err := store.PopulateTodayUsage(list); err != nil {
+					http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+					return
 				}
 				_ = json.NewEncoder(w).Encode(list)
 				return
@@ -215,7 +235,7 @@ func adminKeysHandler(cfg *Config) http.HandlerFunc {
 
 // adminLogsHandler 处理 /admin/logs 与 /admin/logs/{id}：
 //
-//	GET /admin/logs?limit=N&before_id=X&proxy_key=...&model=...&status=success|error&since=...&until=...
+//	GET /admin/logs?page=N&limit=N&proxy_key=...&model=...&status=success|error&since=...&until=...
 //	GET /admin/logs/{id}  返回单条详情（含 error_bodies 里保存的 body 快照）
 func adminLogsHandler(cfg *Config) http.HandlerFunc {
 	h := func(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +258,11 @@ func adminLogsHandler(cfg *Config) http.HandlerFunc {
 				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 				return
 			}
+			k, err := store.GetKey(d.ProxyKey)
+			if err != nil || k.Creator != currentUser(r).Username {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(d)
 			return
 		}
@@ -247,6 +272,7 @@ func adminLogsHandler(cfg *Config) http.HandlerFunc {
 			ProxyKey:    q.Get("proxy_key"),
 			Model:       q.Get("model"),
 			StatusClass: q.Get("status"),
+			Creator:     currentUser(r).Username,
 		}
 		if s := q.Get("since"); s != "" {
 			t, err := parseTime(s)
@@ -257,7 +283,7 @@ func adminLogsHandler(cfg *Config) http.HandlerFunc {
 			f.Since = t
 		}
 		if s := q.Get("until"); s != "" {
-			t, err := parseTime(s)
+			t, err := parseUntil(s)
 			if err != nil {
 				http.Error(w, `{"error":"bad until"}`, http.StatusBadRequest)
 				return
@@ -267,8 +293,26 @@ func adminLogsHandler(cfg *Config) http.HandlerFunc {
 		if s := q.Get("before_id"); s != "" {
 			_, _ = fmt.Sscanf(s, "%d", &f.BeforeID)
 		}
+		pageLimit := 100
 		if s := q.Get("limit"); s != "" {
-			_, _ = fmt.Sscanf(s, "%d", &f.Limit)
+			_, _ = fmt.Sscanf(s, "%d", &pageLimit)
+		}
+		if pageLimit <= 0 {
+			pageLimit = 100
+		}
+		if pageLimit > 500 {
+			pageLimit = 500
+		}
+		page := 1
+		if s := q.Get("page"); s != "" {
+			_, _ = fmt.Sscanf(s, "%d", &page)
+		}
+		if page <= 0 {
+			page = 1
+		}
+		f.Limit = pageLimit
+		if f.BeforeID == 0 {
+			f.Offset = (page - 1) * pageLimit
 		}
 
 		list, err := store.ListLogs(f)
@@ -279,9 +323,35 @@ func adminLogsHandler(cfg *Config) http.HandlerFunc {
 		if list == nil {
 			list = []LogRow{}
 		}
+		total := 0
+		totalPages := 0
+		hasMore := false
+		var nextBeforeID any
+		if f.BeforeID == 0 {
+			total, err = store.CountLogs(f)
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+				return
+			}
+			if total > 0 {
+				totalPages = (total + pageLimit - 1) / pageLimit
+			}
+			hasMore = page < totalPages
+		} else {
+			hasMore = len(list) == pageLimit
+			if hasMore && len(list) > 0 {
+				nextBeforeID = list[len(list)-1].ID
+			}
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"logs":  list,
-			"count": len(list),
+			"logs":           list,
+			"count":          len(list),
+			"total":          total,
+			"page":           page,
+			"limit":          pageLimit,
+			"total_pages":    totalPages,
+			"has_more":       hasMore,
+			"next_before_id": nextBeforeID,
 		})
 	}
 	return requireAuth(h)
@@ -301,7 +371,7 @@ func adminTimeseriesHandler(cfg *Config) http.HandlerFunc {
 		w.Header().Set("content-type", "application/json")
 
 		q := r.URL.Query()
-		f := StatsFilter{ProxyKey: q.Get("proxy_key"), Model: q.Get("model")}
+		f := StatsFilter{ProxyKey: q.Get("proxy_key"), Model: q.Get("model"), Creator: currentUser(r).Username}
 		if s := q.Get("since"); s != "" {
 			t, err := parseTime(s)
 			if err != nil {
@@ -311,7 +381,7 @@ func adminTimeseriesHandler(cfg *Config) http.HandlerFunc {
 			f.Since = t
 		}
 		if s := q.Get("until"); s != "" {
-			t, err := parseTime(s)
+			t, err := parseUntil(s)
 			if err != nil {
 				http.Error(w, `{"error":"bad until"}`, http.StatusBadRequest)
 				return

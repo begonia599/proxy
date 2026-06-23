@@ -29,6 +29,9 @@ type KeyMeta struct {
 	AllowedModels string     `json:"allowed_models"`     // 已废弃：保留列兼容老 DB，恒为 "*"
 	GroupID       *int64     `json:"group_id,omitempty"` // 绑定的小组 = 该 key 的模型白名单
 	Notes         string     `json:"notes"`
+	TodayRequests int64      `json:"today_requests"`
+	TodayCost     float64    `json:"today_cost"`
+	BudgetRemain  *float64   `json:"budget_remaining"` // nil = unlimited
 }
 
 // IsActive returns true if the key has not been revoked.
@@ -196,6 +199,49 @@ func (s *Store) TodaysCost(key string) (float64, error) {
 		return 0, err
 	}
 	return v, nil
+}
+
+// PopulateTodayUsage enriches admin-facing key rows with today's request count,
+// spend, and remaining budget in one aggregate query.
+func (s *Store) PopulateTodayUsage(list []KeyMeta) error {
+	if len(list) == 0 {
+		return nil
+	}
+	now := time.Now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	rows, err := s.db.Query(
+		"SELECT proxy_key, COUNT(*), COALESCE(SUM(cost_usd), 0) FROM requests WHERE ts >= ? GROUP BY proxy_key",
+		dayStart.UnixMilli())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type usage struct {
+		requests int64
+		cost     float64
+	}
+	byKey := make(map[string]usage)
+	for rows.Next() {
+		var key string
+		var u usage
+		if err := rows.Scan(&key, &u.requests, &u.cost); err != nil {
+			return err
+		}
+		byKey[key] = u
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range list {
+		u := byKey[list[i].Key]
+		list[i].TodayRequests = u.requests
+		list[i].TodayCost = u.cost
+		if list[i].DailyBudget > 0 {
+			remaining := list[i].DailyBudget - u.cost
+			list[i].BudgetRemain = &remaining
+		}
+	}
+	return nil
 }
 
 // ---------- 内存缓存 ----------

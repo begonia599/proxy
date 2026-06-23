@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -97,5 +98,44 @@ func TestRewriteTopLevelModel(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestStripUnsignedThinkingBlocks(t *testing.T) {
+	in := []byte(`{"model":"opus","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"bad","signature":""},{"type":"text","text":"keep"},{"type":"thinking","thinking":"good","signature":"signed"},{"type":"redacted_thinking","data":"keep"}]},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
+	got, removed := stripUnsignedThinkingBlocks(in)
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	var body struct {
+		Messages []struct {
+			Content []struct {
+				Type      string `json:"type"`
+				Signature string `json:"signature"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(got, &body); err != nil {
+		t.Fatalf("result is invalid JSON: %v\n%s", err, got)
+	}
+	content := body.Messages[0].Content
+	if len(content) != 3 || content[0].Type != "text" ||
+		content[1].Type != "thinking" || content[1].Signature != "signed" ||
+		content[2].Type != "redacted_thinking" {
+		t.Fatalf("unexpected remaining blocks: %#v", content)
+	}
+	if !bytes.Contains(got, []byte(`{"type":"text","text":"keep"}`)) {
+		t.Fatal("unrelated bytes were not preserved")
+	}
+}
+
+func TestStripAdjacentUnsignedThinkingBlocks(t *testing.T) {
+	in := []byte(`{"messages":[{"content":[{"type":"thinking","signature":""},{"type":"thinking","signature":""},{"type":"text","text":"keep"}]}]}`)
+	got, removed := stripUnsignedThinkingBlocks(in)
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	if string(got) != `{"messages":[{"content":[{"type":"text","text":"keep"}]}]}` {
+		t.Fatalf("got %s", got)
 	}
 }

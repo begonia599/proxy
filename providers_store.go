@@ -17,13 +17,16 @@ import (
 
 // Provider 一个上游服务商。APIKey 仅在内部使用；对外 JSON 由 admin 层脱敏。
 type Provider struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	BaseURL   string    `json:"base_url"`
-	APIKey    string    `json:"-"`      // 永不直接序列化，admin 层用 MaskKey 单独给 masked 字段
-	Format    string    `json:"format"` // anthropic | openai
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
+	ID               int64     `json:"id"`
+	Name             string    `json:"name"`
+	BaseURL          string    `json:"base_url"`
+	OpenAIBaseURL    string    `json:"openai_base_url,omitempty"`
+	AnthropicBaseURL string    `json:"anthropic_base_url,omitempty"`
+	APIKey           string    `json:"-"`      // 永不直接序列化，admin 层用 MaskKey 单独给 masked 字段
+	Format           string    `json:"format"` // anthropic | openai | hybrid
+	Enabled          bool      `json:"enabled"`
+	RequestOverrides *string   `json:"request_overrides,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // ProviderModel 大组里的一条库存记录。Price* 为可选的按服务商计价覆盖
@@ -64,7 +67,7 @@ type GroupMapping struct {
 
 // ────────────────────── providers ──────────────────────
 
-const providerCols = "id, name, base_url, api_key, format, enabled, created_at"
+const providerCols = "id, name, base_url, openai_base_url, anthropic_base_url, api_key, format, enabled, request_overrides, created_at"
 
 func scanProvider(s interface {
 	Scan(...any) error
@@ -72,10 +75,22 @@ func scanProvider(s interface {
 	var p Provider
 	var enabled int
 	var createdMs int64
-	if err := s.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKey, &p.Format, &enabled, &createdMs); err != nil {
+	var overrides sql.NullString
+	var openAIBase, anthropicBase sql.NullString
+	if err := s.Scan(&p.ID, &p.Name, &p.BaseURL, &openAIBase, &anthropicBase, &p.APIKey, &p.Format, &enabled, &overrides, &createdMs); err != nil {
 		return nil, err
 	}
 	p.Enabled = enabled != 0
+	if openAIBase.Valid {
+		p.OpenAIBaseURL = openAIBase.String
+	}
+	if anthropicBase.Valid {
+		p.AnthropicBaseURL = anthropicBase.String
+	}
+	if overrides.Valid {
+		v := overrides.String
+		p.RequestOverrides = &v
+	}
 	p.CreatedAt = time.UnixMilli(createdMs)
 	return &p, nil
 }
@@ -112,25 +127,57 @@ func (s *Store) CreateProvider(p *Provider) (int64, error) {
 	if p.Format == "" {
 		p.Format = "anthropic"
 	}
+	normalizeProviderURLs(p)
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now()
 	}
+	overrides := any(nil)
+	if p.RequestOverrides != nil {
+		overrides = *p.RequestOverrides
+	}
 	res, err := s.db.Exec(
-		"INSERT INTO providers (name, base_url, api_key, format, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-		p.Name, strings.TrimRight(p.BaseURL, "/"), p.APIKey, p.Format, boolToInt(p.Enabled), p.CreatedAt.UnixMilli())
+		"INSERT INTO providers (name, base_url, openai_base_url, anthropic_base_url, api_key, format, enabled, request_overrides, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		p.Name, strings.TrimRight(p.BaseURL, "/"), trimOptionalURL(p.OpenAIBaseURL), trimOptionalURL(p.AnthropicBaseURL),
+		p.APIKey, p.Format, boolToInt(p.Enabled), overrides, p.CreatedAt.UnixMilli())
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
+func normalizeProviderURLs(p *Provider) {
+	if p == nil {
+		return
+	}
+	p.BaseURL = trimOptionalURL(p.BaseURL)
+	p.OpenAIBaseURL = trimOptionalURL(p.OpenAIBaseURL)
+	p.AnthropicBaseURL = trimOptionalURL(p.AnthropicBaseURL)
+	if p.Format != providerFormatHybrid {
+		p.OpenAIBaseURL = ""
+		p.AnthropicBaseURL = ""
+		return
+	}
+	if p.OpenAIBaseURL == "" {
+		p.OpenAIBaseURL = p.AnthropicBaseURL
+	}
+	if p.AnthropicBaseURL == "" {
+		p.AnthropicBaseURL = p.OpenAIBaseURL
+	}
+	if p.BaseURL == "" {
+		p.BaseURL = p.OpenAIBaseURL
+	}
+}
+
 // ProviderUpdate 部分更新：nil 字段不动。
 type ProviderUpdate struct {
-	Name    *string `json:"name,omitempty"`
-	BaseURL *string `json:"base_url,omitempty"`
-	APIKey  *string `json:"api_key,omitempty"` // 空字符串 = 不改（避免脱敏值回写覆盖真 key）
-	Format  *string `json:"format,omitempty"`
-	Enabled *bool   `json:"enabled,omitempty"`
+	Name             *string `json:"name,omitempty"`
+	BaseURL          *string `json:"base_url,omitempty"`
+	OpenAIBaseURL    *string `json:"openai_base_url,omitempty"`
+	AnthropicBaseURL *string `json:"anthropic_base_url,omitempty"`
+	APIKey           *string `json:"api_key,omitempty"` // 空字符串 = 不改（避免脱敏值回写覆盖真 key）
+	Format           *string `json:"format,omitempty"`
+	Enabled          *bool   `json:"enabled,omitempty"`
+	RequestOverrides *string `json:"request_overrides,omitempty"`
 }
 
 func (s *Store) UpdateProvider(id int64, u ProviderUpdate) error {
@@ -144,6 +191,14 @@ func (s *Store) UpdateProvider(id int64, u ProviderUpdate) error {
 		sets = append(sets, "base_url = ?")
 		args = append(args, strings.TrimRight(*u.BaseURL, "/"))
 	}
+	if u.OpenAIBaseURL != nil {
+		sets = append(sets, "openai_base_url = ?")
+		args = append(args, trimOptionalURL(*u.OpenAIBaseURL))
+	}
+	if u.AnthropicBaseURL != nil {
+		sets = append(sets, "anthropic_base_url = ?")
+		args = append(args, trimOptionalURL(*u.AnthropicBaseURL))
+	}
 	if u.APIKey != nil && *u.APIKey != "" {
 		sets = append(sets, "api_key = ?")
 		args = append(args, *u.APIKey)
@@ -155,6 +210,10 @@ func (s *Store) UpdateProvider(id int64, u ProviderUpdate) error {
 	if u.Enabled != nil {
 		sets = append(sets, "enabled = ?")
 		args = append(args, boolToInt(*u.Enabled))
+	}
+	if u.RequestOverrides != nil {
+		sets = append(sets, "request_overrides = ?")
+		args = append(args, *u.RequestOverrides)
 	}
 	if len(sets) == 0 {
 		return nil
@@ -168,6 +227,10 @@ func (s *Store) UpdateProvider(id int64, u ProviderUpdate) error {
 		return fmt.Errorf("provider not found: %d", id)
 	}
 	return nil
+}
+
+func trimOptionalURL(v string) string {
+	return strings.TrimRight(strings.TrimSpace(v), "/")
 }
 
 // DeleteProvider 同时清理它的库存模型、引用它的映射、以及指向它的小组透传，避免悬挂。

@@ -22,6 +22,7 @@ type UsageRecord struct {
 	Model          string // 下游请求的模型名（逻辑名或具体名）
 	Provider       string // 路由命中的上游服务商名（多上游归因）
 	UpstreamModel  string // 上游真实模型名
+	BillingModel   string // 计费用模型名；为空时用 UpstreamModel/Model
 	InputTokens    int
 	OutputTokens   int
 	CacheCreate5m  int
@@ -51,7 +52,10 @@ func writeRecord(r *UsageRecord, reqBody, respBody []byte) {
 	// 算成本：token 部分按「服务商-模型」计价（覆盖优先，回落静态 Anthropic 价表），
 	// web search 按次数。按上游真实模型名计价——逻辑名经映射后真正调用的是它；
 	// 缺失时退回下游请求名。
-	priceModel := r.UpstreamModel
+	priceModel := r.BillingModel
+	if priceModel == "" {
+		priceModel = r.UpstreamModel
+	}
 	if priceModel == "" {
 		priceModel = r.Model
 	}

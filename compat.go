@@ -114,6 +114,10 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 			}, raw, nil)
 			return
 		}
+		if providerSupportsOpenAI(rt.Provider) {
+			relayNativeOpenAIChat(w, r, rt, raw, startTime, proxyKey, oaiReq.Model, oaiReq.Stream, cip, ua)
+			return
+		}
 
 		// ── 转换请求为规范态 Anthropic ──
 		antReq, err := convertRequest(&oaiReq)
@@ -123,6 +127,7 @@ func openaiChatHandler(cfg *Config) http.HandlerFunc {
 		}
 		antReq.Model = rt.UpstreamID // 用上游真实模型名
 		antBody, _ := json.Marshal(antReq)
+		antBody = applyProviderRequestOverridesForProtocol(antBody, rt.Provider, protocolAnthropic)
 
 		// ── 调上游（统一返回 Anthropic 规范态，无论 provider 格式）──
 		res := callUpstreamAnthropic(rt, antBody, oaiReq.Stream)
@@ -192,6 +197,235 @@ func relayNonStream(w http.ResponseWriter, res *upstreamResult, rec *UsageRecord
 	w.Header().Set("content-type", "application/json")
 	_ = json.NewEncoder(w).Encode(oaiResp)
 	go writeRecord(rec, reqBody, respBody)
+}
+
+func relayNativeOpenAIChat(w http.ResponseWriter, r *http.Request, rt *RouteTarget, raw []byte, startTime time.Time, proxyKey, requestedModel string, stream bool, cip, ua string) {
+	if rt.UpstreamID != requestedModel {
+		if rewritten, ok := rewriteTopLevelModel(raw, rt.UpstreamID); ok {
+			raw = rewritten
+		}
+	}
+	raw = applyProviderRequestOverridesForProtocol(raw, rt.Provider, protocolOpenAI)
+	if stream {
+		raw = forceOpenAIChatStreamUsage(raw)
+	}
+
+	upstreamURL := providerOpenAIBaseURL(rt.Provider) + "/v1/chat/completions"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(raw))
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", "failed to build upstream request")
+		return
+	}
+	copyResponsesRequestHeaders(req.Header, r.Header)
+	req.Header.Set("authorization", "Bearer "+rt.Provider.APIKey)
+	req.Header.Set("content-type", "application/json")
+	req.Header.Set("accept-encoding", "identity")
+
+	resp, err := openAIResponsesHTTPClient().Do(req)
+	if err != nil {
+		log.Printf("native chat: upstream error: %v", err)
+		writeOpenAIError(w, http.StatusBadGateway, "server_error", "upstream request failed")
+		go writeRecord(&UsageRecord{
+			Time: startTime, ProxyKey: proxyKey, Endpoint: "/v1/chat/completions", Method: "POST",
+			Status: http.StatusBadGateway, Model: requestedModel, Provider: rt.Provider.Name,
+			UpstreamModel: rt.UpstreamID, BillingModel: rt.UpstreamID,
+			ClientIP: cip, UserAgent: ua,
+			LatencyMs: time.Since(startTime).Milliseconds(), StopReason: "proxy_upstream_error",
+		}, nil, nil)
+		return
+	}
+	defer resp.Body.Close()
+
+	rec := &UsageRecord{
+		Time:          startTime,
+		ProxyKey:      proxyKey,
+		Endpoint:      "/v1/chat/completions",
+		Method:        "POST",
+		Status:        resp.StatusCode,
+		Model:         requestedModel,
+		Provider:      rt.Provider.Name,
+		UpstreamModel: rt.UpstreamID,
+		BillingModel:  rt.UpstreamID,
+		ClientIP:      cip,
+		UserAgent:     ua,
+		Streaming:     stream || strings.HasPrefix(resp.Header.Get("content-type"), "text/event-stream"),
+		StopReason:    "native_openai_chat",
+	}
+
+	if rec.Streaming {
+		relayNativeOpenAIChatStream(w, r, resp, rec)
+		return
+	}
+	relayNativeOpenAIChatNonStream(w, resp, rec)
+}
+
+func relayNativeOpenAIChatNonStream(w http.ResponseWriter, resp *http.Response, rec *UsageRecord) {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
+	rec.LatencyMs = time.Since(rec.Time).Milliseconds()
+	parseOpenAIChatUsageJSON(body, rec)
+
+	copyResponsesResponseHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
+	go writeRecord(rec, nil, body)
+}
+
+func relayNativeOpenAIChatStream(w http.ResponseWriter, r *http.Request, resp *http.Response, rec *UsageRecord) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", "streaming not supported")
+		return
+	}
+	copyResponsesResponseHeaders(w.Header(), resp.Header)
+	w.Header().Set("content-type", "text/event-stream")
+	w.Header().Set("cache-control", "no-cache")
+	w.Header().Set("connection", "keep-alive")
+	w.WriteHeader(resp.StatusCode)
+
+	var teeBuf bytes.Buffer
+	const maxTee = 4 << 20
+	buf := make([]byte, 32<<10)
+	streamBroken := false
+	for {
+		if err := r.Context().Err(); err != nil {
+			streamBroken = true
+			break
+		}
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			_, _ = w.Write(chunk)
+			flusher.Flush()
+			if teeBuf.Len() < maxTee {
+				remain := maxTee - teeBuf.Len()
+				if len(chunk) > remain {
+					chunk = chunk[:remain]
+				}
+				teeBuf.Write(chunk)
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				streamBroken = true
+			}
+			break
+		}
+	}
+
+	rec.LatencyMs = time.Since(rec.Time).Milliseconds()
+	parseOpenAIChatUsageSSE(teeBuf.Bytes(), rec)
+	if streamBroken && rec.StopReason == "native_openai_chat" {
+		rec.StopReason = "proxy_stream_interrupted"
+	}
+	go writeRecord(rec, nil, teeBuf.Bytes())
+}
+
+func forceOpenAIChatStreamUsage(raw []byte) []byte {
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return raw
+	}
+	var opts map[string]json.RawMessage
+	if existing, ok := body["stream_options"]; ok && len(existing) > 0 && string(existing) != "null" {
+		_ = json.Unmarshal(existing, &opts)
+	}
+	if opts == nil {
+		opts = map[string]json.RawMessage{}
+	}
+	opts["include_usage"] = json.RawMessage("true")
+	encoded, err := json.Marshal(opts)
+	if err != nil {
+		return raw
+	}
+	body["stream_options"] = encoded
+	out, err := json.Marshal(body)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+type openAIChatUsage struct {
+	PromptTokens            int                     `json:"prompt_tokens"`
+	CompletionTokens        int                     `json:"completion_tokens"`
+	PromptTokensDetails     openAIChatPromptDetails `json:"prompt_tokens_details"`
+	CompletionTokensDetails struct {
+		ReasoningTokens int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
+}
+
+type openAIChatPromptDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+func (u openAIChatUsage) toRecord(rec *UsageRecord) {
+	if u.PromptTokens > 0 {
+		rec.InputTokens = u.PromptTokens
+	}
+	if u.CompletionTokens > 0 {
+		rec.OutputTokens = u.CompletionTokens
+	}
+	if u.PromptTokensDetails.CachedTokens > 0 {
+		rec.CacheRead = u.PromptTokensDetails.CachedTokens
+	}
+}
+
+func parseOpenAIChatUsageJSON(body []byte, rec *UsageRecord) {
+	var r struct {
+		ID      string          `json:"id"`
+		Model   string          `json:"model"`
+		Usage   openAIChatUsage `json:"usage"`
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &r); err != nil {
+		return
+	}
+	if r.ID != "" {
+		rec.RequestID = r.ID
+	}
+	if r.Model != "" {
+		rec.UpstreamModel = r.Model
+	}
+	if len(r.Choices) > 0 && r.Choices[0].FinishReason != "" {
+		rec.StopReason = r.Choices[0].FinishReason
+	}
+	r.Usage.toRecord(rec)
+}
+
+func parseOpenAIChatUsageSSE(body []byte, rec *UsageRecord) {
+	for _, line := range bytes.Split(body, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		var ev struct {
+			ID      string          `json:"id"`
+			Model   string          `json:"model"`
+			Usage   openAIChatUsage `json:"usage"`
+			Choices []struct {
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			continue
+		}
+		if ev.ID != "" {
+			rec.RequestID = ev.ID
+		}
+		if ev.Model != "" {
+			rec.UpstreamModel = ev.Model
+		}
+		if len(ev.Choices) > 0 && ev.Choices[0].FinishReason != "" {
+			rec.StopReason = ev.Choices[0].FinishReason
+		}
+		ev.Usage.toRecord(rec)
+	}
 }
 
 // ── 流式 SSE 中继（输入是 Anthropic 规范态 SSE 流）──

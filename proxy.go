@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -154,6 +156,229 @@ func isJSONSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
+// stripTopLevelMetadata removes client identity metadata without re-marshalling
+// the rest of the request, preserving byte layout for prompt caching.
+func stripTopLevelMetadata(raw []byte) []byte {
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return raw
+	}
+	if _, ok := body["metadata"]; !ok {
+		return raw
+	}
+
+	depth, start := 0, -1
+	inString, escaped := false, false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			if depth == 1 && bytes.HasPrefix(raw[i:], []byte(`"metadata"`)) {
+				start = i
+				i += len(`"metadata"`) - 1
+				goto found
+			}
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+		}
+	}
+	return raw
+
+found:
+	colon := start + len(`"metadata"`)
+	for colon < len(raw) && isJSONSpace(raw[colon]) {
+		colon++
+	}
+	if colon >= len(raw) || raw[colon] != ':' {
+		return raw
+	}
+	valueStart := colon + 1
+	for valueStart < len(raw) && isJSONSpace(raw[valueStart]) {
+		valueStart++
+	}
+	valueEnd := jsonValueEnd(raw, valueStart)
+	if valueEnd <= valueStart {
+		return raw
+	}
+
+	fieldStart, fieldEnd := start, valueEnd
+	prev := fieldStart - 1
+	for prev >= 0 && isJSONSpace(raw[prev]) {
+		prev--
+	}
+	if prev >= 0 && raw[prev] == ',' {
+		fieldStart = prev
+	} else {
+		next := fieldEnd
+		for next < len(raw) && isJSONSpace(raw[next]) {
+			next++
+		}
+		if next < len(raw) && raw[next] == ',' {
+			fieldEnd = next + 1
+		}
+	}
+	out := make([]byte, 0, len(raw)-(fieldEnd-fieldStart))
+	out = append(out, raw[:fieldStart]...)
+	out = append(out, raw[fieldEnd:]...)
+	return out
+}
+
+func jsonValueEnd(raw []byte, start int) int {
+	if start >= len(raw) {
+		return start
+	}
+	if raw[start] != '{' && raw[start] != '[' && raw[start] != '"' {
+		i := start
+		for i < len(raw) && raw[i] != ',' && raw[i] != '}' && !isJSONSpace(raw[i]) {
+			i++
+		}
+		return i
+	}
+
+	stack := []byte{raw[start]}
+	inString, escaped := raw[start] == '"', false
+	for i := start + 1; i < len(raw); i++ {
+		c := raw[i]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+				if len(stack) == 1 && stack[0] == '"' {
+					return i + 1
+				}
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			stack = append(stack, c)
+		case '}', ']':
+			if len(stack) == 0 {
+				return start
+			}
+			open := stack[len(stack)-1]
+			if (open == '{' && c != '}') || (open == '[' && c != ']') {
+				return start
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return i + 1
+			}
+		}
+	}
+	return start
+}
+
+type jsonContainer struct {
+	kind  byte
+	start int
+}
+
+type jsonSpan struct {
+	start int
+	end   int
+}
+
+// stripUnsignedThinkingBlocks removes only historical thinking blocks whose
+// signature is explicitly empty. Anthropic always rejects these blocks, while
+// valid signed and redacted-thinking blocks remain byte-for-byte unchanged.
+func stripUnsignedThinkingBlocks(raw []byte) ([]byte, int) {
+	if !bytes.Contains(raw, []byte(`"signature"`)) {
+		return raw, 0
+	}
+
+	stack := make([]jsonContainer, 0, 16)
+	spans := make([]jsonSpan, 0, 4)
+	inString, escaped := false, false
+	for i, c := range raw {
+		if inString {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			stack = append(stack, jsonContainer{kind: c, start: i})
+		case '}', ']':
+			if len(stack) == 0 {
+				return raw, 0
+			}
+			top := stack[len(stack)-1]
+			if (top.kind == '{' && c != '}') || (top.kind == '[' && c != ']') {
+				return raw, 0
+			}
+			if c == '}' && len(stack) >= 2 && stack[len(stack)-2].kind == '[' {
+				candidate := raw[top.start : i+1]
+				if bytes.Contains(candidate, []byte(`"signature"`)) {
+					var block struct {
+						Type      string  `json:"type"`
+						Signature *string `json:"signature"`
+					}
+					if json.Unmarshal(candidate, &block) == nil && block.Type == "thinking" &&
+						block.Signature != nil && *block.Signature == "" {
+						spans = append(spans, jsonSpan{start: top.start, end: i + 1})
+					}
+				}
+			}
+			stack = stack[:len(stack)-1]
+		}
+	}
+	if len(stack) != 0 || len(spans) == 0 {
+		return raw, 0
+	}
+
+	out := raw
+	for i := len(spans) - 1; i >= 0; i-- {
+		start, end := spans[i].start, spans[i].end
+		prev := start - 1
+		for prev >= 0 && isJSONSpace(out[prev]) {
+			prev--
+		}
+		next := end
+		for next < len(out) && isJSONSpace(out[next]) {
+			next++
+		}
+		switch {
+		case prev >= 0 && out[prev] == ',':
+			start = prev
+		case next < len(out) && out[next] == ',':
+			end = next + 1
+		case prev < 0 || out[prev] != '[' || next >= len(out) || out[next] != ']':
+			return raw, 0
+		}
+		cleaned := make([]byte, 0, len(out)-(end-start))
+		cleaned = append(cleaned, out[:start]...)
+		cleaned = append(cleaned, out[end:]...)
+		out = cleaned
+	}
+	return out, len(spans)
+}
+
 // writeAnthropicError 输出与上游同款的错误结构，让 SDK 客户端能正常解析。
 func writeAnthropicError(w http.ResponseWriter, status int, errType, message string) {
 	w.Header().Set("content-type", "application/json")
@@ -223,6 +448,23 @@ func buildReverseProxy(cfg *Config) *httputil.ReverseProxy {
 	rp := httputil.NewSingleHostReverseProxy(placeholder)
 	rp.FlushInterval = -1
 
+	if socksAddr := os.Getenv("CLAUDE_PROXY_UPSTREAM_SOCKS5"); socksAddr != "" {
+		proxyURL, err := url.Parse("socks5://" + socksAddr)
+		if err != nil {
+			log.Fatalf("invalid CLAUDE_PROXY_UPSTREAM_SOCKS5 %q: %v", socksAddr, err)
+		}
+		rp.Transport = &http.Transport{
+			Proxy:                 http.ProxyURL(proxyURL),
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ExpectContinueTimeout: time.Second,
+		}
+		log.Printf("upstream transport: SOCKS5 via %s", socksAddr)
+	}
+
 	rp.Director = func(r *http.Request) {
 		rt := routeFrom(r.Context())
 		// 无路由是 bug（forwardHandler 保证总会附上 RouteTarget）。
@@ -236,7 +478,7 @@ func buildReverseProxy(cfg *Config) *httputil.ReverseProxy {
 			r.Header.Del("authorization")
 			return
 		}
-		base := rt.Provider.BaseURL
+		base := providerAnthropicBaseURL(rt.Provider)
 		realKey := rt.Provider.APIKey
 		target, err := url.Parse(base)
 		if err != nil {
@@ -481,15 +723,21 @@ func forwardHandler(cfg *Config, rp *httputil.ReverseProxy) http.HandlerFunc {
 							raw = rewritten
 						}
 					}
+					raw = applyProviderRequestOverridesForProtocol(raw, rt.Provider, protocolAnthropic)
 
-					// OpenAI 格式上游：走出站翻译路径，不经 ReverseProxy。
-					if rt.Provider.Format == "openai" {
+					// 纯 OpenAI 格式上游：走出站翻译路径，不经 ReverseProxy。
+					// hybrid 在 /v1/messages 入口按 Anthropic 原生透传。
+					if rt.Provider.Format == providerFormatOpenAI {
 						dispatchAnthropicToOpenAI(w, r, rt, raw, &UsageRecord{
 							Time: time.Now(), ProxyKey: proxyKey, Endpoint: r.URL.Path, Method: r.Method,
 							Model: peek.Model, Provider: rt.Provider.Name, UpstreamModel: rt.UpstreamID,
 							ClientIP: clientIP(r), UserAgent: r.Header.Get("user-agent"),
 						})
 						return
+					}
+					if cleaned, removed := stripUnsignedThinkingBlocks(raw); removed > 0 {
+						raw = cleaned
+						log.Printf("removed %d unsigned thinking block(s) model=%s", removed, peek.Model)
 					}
 
 					// Anthropic 格式上游：装回 body + RouteTarget，走 ReverseProxy。
@@ -515,9 +763,9 @@ func forwardHandler(cfg *Config, rp *httputil.ReverseProxy) http.HandlerFunc {
 					}, raw, nil)
 					return
 				}
-				// 无 model 的请求无法做格式翻译（出站翻译依赖 model 名）。透传到 openai 格式
+				// 无 model 的请求无法做格式翻译（出站翻译依赖 model 名）。透传到纯 openai 格式
 				// 上游会把 Anthropic 体发去 /v1/chat/completions，必然失败——直接拒绝更诚实。
-				if rt.Provider.Format == "openai" {
+				if rt.Provider.Format == providerFormatOpenAI {
 					writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error",
 						"requests without a model field cannot be routed to an openai-format provider")
 					go writeRecord(&UsageRecord{
@@ -528,6 +776,7 @@ func forwardHandler(cfg *Config, rp *httputil.ReverseProxy) http.HandlerFunc {
 					return
 				}
 				r.Header.Set("x-proxy-provider", rt.Provider.Name)
+				raw = applyProviderRequestOverridesForProtocol(raw, rt.Provider, protocolAnthropic)
 				r.Body = io.NopCloser(bytes.NewReader(raw))
 				r.ContentLength = int64(len(raw))
 				r = r.WithContext(withReqBody(r.Context(), raw))

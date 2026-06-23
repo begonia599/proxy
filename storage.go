@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE INDEX IF NOT EXISTS idx_requests_ts        ON requests(ts);
 CREATE INDEX IF NOT EXISTS idx_requests_proxy_key ON requests(proxy_key);
 CREATE INDEX IF NOT EXISTS idx_requests_model     ON requests(model);
+CREATE INDEX IF NOT EXISTS idx_requests_key_ts    ON requests(proxy_key, ts);
 
 CREATE TABLE IF NOT EXISTS proxy_keys (
     key             TEXT PRIMARY KEY,           -- sk-proxy-xxxx
@@ -71,8 +72,10 @@ CREATE TABLE IF NOT EXISTS providers (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT UNIQUE NOT NULL,                -- anthropic-official / openrouter / ...
     base_url    TEXT NOT NULL,                       -- https://api.anthropic.com 等（不含尾斜杠）
+    openai_base_url TEXT,
+    anthropic_base_url TEXT,
     api_key     TEXT NOT NULL,
-    format      TEXT NOT NULL DEFAULT 'anthropic',   -- anthropic | openai
+    format      TEXT NOT NULL DEFAULT 'anthropic',   -- anthropic | openai | hybrid
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL
 );
@@ -147,6 +150,12 @@ var migrations = []string{
 	"ALTER TABLE provider_models ADD COLUMN price_cache_write_5m REAL",
 	"ALTER TABLE provider_models ADD COLUMN price_cache_write_1h REAL",
 	"ALTER TABLE provider_models ADD COLUMN price_cache_read REAL",
+	// 服务商级请求参数覆盖。NULL = 使用该协议格式的安全默认；空字符串 = 不做覆盖。
+	"ALTER TABLE providers ADD COLUMN request_overrides TEXT",
+	// 混合协议服务商可为 OpenAI / Anthropic 两套入口配置不同 base URL。
+	// NULL/空 = 回落 base_url。
+	"ALTER TABLE providers ADD COLUMN openai_base_url TEXT",
+	"ALTER TABLE providers ADD COLUMN anthropic_base_url TEXT",
 }
 
 type Store struct {
@@ -231,6 +240,7 @@ type StatsFilter struct {
 	Until    time.Time // 不含
 	ProxyKey string    // 空 = 所有
 	Model    string    // 空 = 所有
+	Creator  string    // 非空 = 仅统计该用户创建的 key
 }
 
 type Totals struct {
@@ -242,7 +252,8 @@ type Totals struct {
 	CacheRead      int64   `json:"cache_read"`
 	WebSearchCount int64   `json:"web_search_count"`
 	CostUSD        float64 `json:"cost_usd"`
-	CacheHitRate   float64 `json:"cache_hit_rate"` // cache_read / (input + cache_read)
+	CacheBase      int64   `json:"-"`              // provider-normalized cache denominator
+	CacheHitRate   float64 `json:"cache_hit_rate"` // cache_read / CacheBase
 	Errors         int64   `json:"errors"`         // status != 2xx
 }
 
@@ -251,11 +262,25 @@ type StatsBucket struct {
 	Totals
 }
 
+type RiskSummary struct {
+	RecentHourCost    float64 `json:"recent_hour_cost"`
+	MaxRequestCost    float64 `json:"max_request_cost"`
+	MaxRequestModel   string  `json:"max_request_model,omitempty"`
+	MaxRequestTime    string  `json:"max_request_time,omitempty"`
+	LowCacheRequests  int64   `json:"low_cache_requests"`
+	StreamingRequests int64   `json:"streaming_requests"`
+}
+
 type StatsResult struct {
 	Totals
 	ByProxyKey []StatsBucket `json:"by_proxy_key"`
 	ByModel    []StatsBucket `json:"by_model"`
+	ByProvider []StatsBucket `json:"by_provider"`
+	ByEndpoint []StatsBucket `json:"by_endpoint"`
 	ByDay      []StatsBucket `json:"by_day"`
+	Risk       RiskSummary   `json:"risk"`
+	ServerDate string        `json:"server_date"`
+	Timezone   string        `json:"timezone"`
 }
 
 func (s *Store) buildWhere(f StatsFilter) (string, []any) {
@@ -276,6 +301,10 @@ func (s *Store) buildWhere(f StatsFilter) (string, []any) {
 	if f.Model != "" {
 		clauses = append(clauses, "model = ?")
 		args = append(args, f.Model)
+	}
+	if f.Creator != "" {
+		clauses = append(clauses, "proxy_key IN (SELECT key FROM proxy_keys WHERE creator = ?)")
+		args = append(args, f.Creator)
 	}
 	return "WHERE " + joinAnd(clauses), args
 }
@@ -300,6 +329,7 @@ COALESCE(SUM(cache_create_1h), 0),
 COALESCE(SUM(cache_read), 0),
 COALESCE(SUM(web_search_count), 0),
 COALESCE(SUM(cost_usd), 0),
+COALESCE(SUM(CASE WHEN provider LIKE 'openai%' THEN input_tokens ELSE input_tokens + cache_read END), 0),
 COALESCE(SUM(CASE WHEN status < 200 OR status >= 300 THEN 1 ELSE 0 END), 0)
 `
 
@@ -309,16 +339,16 @@ func (s *Store) scanTotals(rows *sql.Rows, hasKey bool) ([]StatsBucket, error) {
 		var b StatsBucket
 		if hasKey {
 			if err := rows.Scan(&b.Key, &b.Requests, &b.InputTokens, &b.OutputTokens,
-				&b.CacheCreate5m, &b.CacheCreate1h, &b.CacheRead, &b.WebSearchCount, &b.CostUSD, &b.Errors); err != nil {
+				&b.CacheCreate5m, &b.CacheCreate1h, &b.CacheRead, &b.WebSearchCount, &b.CostUSD, &b.CacheBase, &b.Errors); err != nil {
 				return nil, err
 			}
 		} else {
 			if err := rows.Scan(&b.Requests, &b.InputTokens, &b.OutputTokens,
-				&b.CacheCreate5m, &b.CacheCreate1h, &b.CacheRead, &b.WebSearchCount, &b.CostUSD, &b.Errors); err != nil {
+				&b.CacheCreate5m, &b.CacheCreate1h, &b.CacheRead, &b.WebSearchCount, &b.CostUSD, &b.CacheBase, &b.Errors); err != nil {
 				return nil, err
 			}
 		}
-		b.CacheHitRate = hitRate(b.InputTokens, b.CacheRead)
+		b.CacheHitRate = hitRateFromBase(b.CacheRead, b.CacheBase)
 		out = append(out, b)
 	}
 	return out, rows.Err()
@@ -332,6 +362,13 @@ func hitRate(input, cacheRead int64) float64 {
 	return float64(cacheRead) / float64(total)
 }
 
+func hitRateFromBase(cacheRead, cacheBase int64) float64 {
+	if cacheBase <= 0 {
+		return 0
+	}
+	return float64(cacheRead) / float64(cacheBase)
+}
+
 func (s *Store) Stats(f StatsFilter) (*StatsResult, error) {
 	where, args := s.buildWhere(f)
 
@@ -339,12 +376,14 @@ func (s *Store) Stats(f StatsFilter) (*StatsResult, error) {
 	row := s.db.QueryRow("SELECT "+totalsCols+" FROM requests "+where, args...)
 	var t Totals
 	if err := row.Scan(&t.Requests, &t.InputTokens, &t.OutputTokens,
-		&t.CacheCreate5m, &t.CacheCreate1h, &t.CacheRead, &t.WebSearchCount, &t.CostUSD, &t.Errors); err != nil {
+		&t.CacheCreate5m, &t.CacheCreate1h, &t.CacheRead, &t.WebSearchCount, &t.CostUSD, &t.CacheBase, &t.Errors); err != nil {
 		return nil, fmt.Errorf("scan totals: %w", err)
 	}
-	t.CacheHitRate = hitRate(t.InputTokens, t.CacheRead)
+	t.CacheHitRate = hitRateFromBase(t.CacheRead, t.CacheBase)
 
-	result := &StatsResult{Totals: t}
+	now := time.Now()
+	zone, _ := now.Zone()
+	result := &StatsResult{Totals: t, ServerDate: now.Format("2006-01-02"), Timezone: zone}
 
 	// 按 proxy_key
 	rows, err := s.db.Query("SELECT proxy_key, "+totalsCols+" FROM requests "+where+" GROUP BY proxy_key ORDER BY SUM(cost_usd) DESC", args...)
@@ -369,6 +408,28 @@ func (s *Store) Stats(f StatsFilter) (*StatsResult, error) {
 		return nil, err
 	}
 
+	// 按 provider：区分 Anthropic / OpenAI / 其它上游。
+	rows, err = s.db.Query("SELECT COALESCE(NULLIF(provider, ''), '(unknown)'), "+totalsCols+" FROM requests "+where+" GROUP BY 1 ORDER BY SUM(cost_usd) DESC", args...)
+	if err != nil {
+		return nil, err
+	}
+	result.ByProvider, err = s.scanTotals(rows, true)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	// 按 endpoint：区分 /v1/messages、/v1/responses、/v1/chat/completions 等调用面。
+	rows, err = s.db.Query("SELECT COALESCE(NULLIF(endpoint, ''), '(unknown)'), "+totalsCols+" FROM requests "+where+" GROUP BY 1 ORDER BY SUM(cost_usd) DESC", args...)
+	if err != nil {
+		return nil, err
+	}
+	result.ByEndpoint, err = s.scanTotals(rows, true)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+
 	// 按天
 	rows, err = s.db.Query("SELECT strftime('%Y-%m-%d', ts/1000, 'unixepoch', 'localtime'), "+totalsCols+" FROM requests "+where+" GROUP BY 1 ORDER BY 1", args...)
 	if err != nil {
@@ -380,7 +441,45 @@ func (s *Store) Stats(f StatsFilter) (*StatsResult, error) {
 		return nil, err
 	}
 
+	if err := s.populateRiskSummary(result, f); err != nil {
+		return nil, err
+	}
+
 	return result, nil
+}
+
+func (s *Store) populateRiskSummary(result *StatsResult, f StatsFilter) error {
+	where, args := s.buildWhere(f)
+
+	var risk RiskSummary
+	if result.Requests > 0 {
+		risk.StreamingRequests = 0
+	}
+	row := s.db.QueryRow("SELECT COALESCE(SUM(CASE WHEN streaming = 1 THEN 1 ELSE 0 END), 0), "+
+		"COALESCE(SUM(CASE WHEN status >= 200 AND status < 300 AND (input_tokens + cache_read) >= 1000 AND cache_read * 1.0 / (input_tokens + cache_read) < 0.20 THEN 1 ELSE 0 END), 0) "+
+		"FROM requests "+where, args...)
+	if err := row.Scan(&risk.StreamingRequests, &risk.LowCacheRequests); err != nil {
+		return fmt.Errorf("scan risk counts: %w", err)
+	}
+
+	maxRow := s.db.QueryRow("SELECT COALESCE(cost_usd, 0), COALESCE(model, ''), COALESCE(strftime('%Y-%m-%d %H:%M:%S', ts/1000, 'unixepoch', 'localtime'), '') "+
+		"FROM requests "+where+" ORDER BY cost_usd DESC, id DESC LIMIT 1", args...)
+	if err := maxRow.Scan(&risk.MaxRequestCost, &risk.MaxRequestModel, &risk.MaxRequestTime); err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("scan max request: %w", err)
+	}
+
+	recent := f
+	hourAgo := time.Now().Add(-time.Hour)
+	if recent.Since.IsZero() || recent.Since.Before(hourAgo) {
+		recent.Since = hourAgo
+	}
+	recentWhere, recentArgs := s.buildWhere(recent)
+	if err := s.db.QueryRow("SELECT COALESCE(SUM(cost_usd), 0) FROM requests "+recentWhere, recentArgs...).Scan(&risk.RecentHourCost); err != nil {
+		return fmt.Errorf("scan recent hour cost: %w", err)
+	}
+
+	result.Risk = risk
+	return nil
 }
 
 // ---------- 时序聚合 ----------
@@ -415,7 +514,8 @@ func (s *Store) Timeseries(f StatsFilter, granularity string) ([]TimeBucket, err
 		"COALESCE(SUM(cache_create_5m + cache_create_1h), 0), " +
 		"COALESCE(SUM(cache_read), 0), " +
 		"COALESCE(SUM(web_search_count), 0), " +
-		"COALESCE(SUM(cost_usd), 0) " +
+		"COALESCE(SUM(cost_usd), 0), " +
+		"COALESCE(SUM(CASE WHEN provider LIKE 'openai%' THEN input_tokens ELSE input_tokens + cache_read END), 0) " +
 		"FROM requests " + where + " GROUP BY bucket ORDER BY bucket"
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
@@ -425,11 +525,12 @@ func (s *Store) Timeseries(f StatsFilter, granularity string) ([]TimeBucket, err
 	var out []TimeBucket
 	for rows.Next() {
 		var b TimeBucket
+		var cacheBase int64
 		if err := rows.Scan(&b.Bucket, &b.Requests, &b.InputTokens, &b.OutputTokens,
-			&b.CacheCreate, &b.CacheRead, &b.WebSearchCount, &b.CostUSD); err != nil {
+			&b.CacheCreate, &b.CacheRead, &b.WebSearchCount, &b.CostUSD, &cacheBase); err != nil {
 			return nil, err
 		}
-		b.CacheHitRate = hitRate(b.InputTokens, b.CacheRead)
+		b.CacheHitRate = hitRateFromBase(b.CacheRead, cacheBase)
 		out = append(out, b)
 	}
 	return out, rows.Err()
@@ -468,11 +569,13 @@ type LogFilter struct {
 	Until    time.Time // 不含
 	ProxyKey string
 	Model    string
+	Creator  string // 非空 = 仅返回该用户创建的 key 的日志
 	// StatusClass: "success" → 2xx, "error" → !2xx, "" → 全部
 	StatusClass string
 	// 游标分页：返回 id < BeforeID 的，按 id 倒序。0 = 从最新开始
 	BeforeID int64
 	Limit    int
+	Offset   int
 }
 
 const logCols = `
@@ -502,7 +605,7 @@ func (s *Store) scanLogRow(rows *sql.Rows) (*LogRow, error) {
 	return &r, nil
 }
 
-func (s *Store) ListLogs(f LogFilter) ([]LogRow, error) {
+func logFilterWhere(f LogFilter) (string, []any) {
 	clauses := []string{"1=1"}
 	args := []any{}
 	if !f.Since.IsZero() {
@@ -521,6 +624,10 @@ func (s *Store) ListLogs(f LogFilter) ([]LogRow, error) {
 		clauses = append(clauses, "model = ?")
 		args = append(args, f.Model)
 	}
+	if f.Creator != "" {
+		clauses = append(clauses, "proxy_key IN (SELECT key FROM proxy_keys WHERE creator = ?)")
+		args = append(args, f.Creator)
+	}
 	switch f.StatusClass {
 	case "success":
 		clauses = append(clauses, "status >= 200 AND status < 300")
@@ -531,13 +638,35 @@ func (s *Store) ListLogs(f LogFilter) ([]LogRow, error) {
 		clauses = append(clauses, "id < ?")
 		args = append(args, f.BeforeID)
 	}
-	limit := f.Limit
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	return joinAnd(clauses), args
+}
+
+func (s *Store) CountLogs(f LogFilter) (int, error) {
+	where, args := logFilterWhere(f)
+	row := s.db.QueryRow("SELECT COUNT(*) FROM requests WHERE "+where, args...)
+	var count int
+	if err := row.Scan(&count); err != nil {
+		return 0, err
 	}
-	q := "SELECT " + logCols + " FROM requests WHERE " + joinAnd(clauses) +
-		" ORDER BY id DESC LIMIT ?"
+	return count, nil
+}
+
+func (s *Store) ListLogs(f LogFilter) ([]LogRow, error) {
+	where, args := logFilterWhere(f)
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	} else if limit > 501 {
+		limit = 501
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	q := "SELECT " + logCols + " FROM requests WHERE " + where +
+		" ORDER BY id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit)
+	args = append(args, offset)
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err

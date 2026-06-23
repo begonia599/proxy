@@ -38,7 +38,7 @@ type upstreamResult struct {
 //
 // stream 表示下游是否要流式；与上游是否流式保持一致。
 func callUpstreamAnthropic(rt *RouteTarget, antRaw []byte, stream bool) *upstreamResult {
-	if rt.Provider.Format == "openai" {
+	if rt.Provider.Format == providerFormatOpenAI {
 		return callOpenAIUpstream(rt, antRaw, stream)
 	}
 	return callAnthropicUpstream(rt, antRaw)
@@ -47,7 +47,7 @@ func callUpstreamAnthropic(rt *RouteTarget, antRaw []byte, stream bool) *upstrea
 // ── anthropic 格式上游：直发，model 已在 forwardHandler 改写好 ──
 
 func callAnthropicUpstream(rt *RouteTarget, antRaw []byte) *upstreamResult {
-	req, err := http.NewRequest("POST", rt.Provider.BaseURL+"/v1/messages", bytes.NewReader(antRaw))
+	req, err := http.NewRequest("POST", providerAnthropicBaseURL(rt.Provider)+"/v1/messages", bytes.NewReader(antRaw))
 	if err != nil {
 		return &upstreamResult{Err: err}
 	}
@@ -82,7 +82,8 @@ func callOpenAIUpstream(rt *RouteTarget, antRaw []byte, stream bool) *upstreamRe
 	}
 
 	oaiBody, _ := json.Marshal(oaiReq)
-	req, err := http.NewRequest("POST", rt.Provider.BaseURL+"/v1/chat/completions", bytes.NewReader(oaiBody))
+	oaiBody = applyProviderRequestOverridesForProtocol(oaiBody, rt.Provider, protocolOpenAI)
+	req, err := http.NewRequest("POST", providerOpenAIBaseURL(rt.Provider)+"/v1/chat/completions", bytes.NewReader(oaiBody))
 	if err != nil {
 		return &upstreamResult{Err: err}
 	}

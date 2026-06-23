@@ -86,6 +86,16 @@ func CostOf(model string, input, output, cacheCreate5m, cacheCreate1h, cacheRead
 //  2. 静态 Anthropic 家族价表（按真实模型名匹配）
 //  3. 都没有 → 0
 func tokenCost(providerName, model string, input, output, cacheCreate5m, cacheCreate1h, cacheRead int) float64 {
+	// OpenAI Responses usage reports input_tokens inclusive of cached_tokens.
+	// Anthropic reports input_tokens separately from cache_read_input_tokens.
+	// Normalize here so cached OpenAI input is not billed once at full input
+	// price and again at cached-input price.
+	if strings.HasPrefix(providerName, "openai") && cacheRead > 0 {
+		input -= cacheRead
+		if input < 0 {
+			input = 0
+		}
+	}
 	if providerRegistry != nil {
 		if p, ok := providerRegistry.PriceFor(providerName, model); ok {
 			return p.Cost(input, output, cacheCreate5m, cacheCreate1h, cacheRead)
